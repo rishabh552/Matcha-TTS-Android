@@ -8,7 +8,10 @@ import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.example.tts.databinding.ActivityMainBinding
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -19,14 +22,17 @@ class MainActivity : AppCompatActivity() {
         private const val SHORT_TEXT_SPEED = 1.35f
         private const val NORMAL_TEXT_SPEED = 1.10f
 
-        // Keep synthesis requests bounded to avoid very large JNI/audio allocations.
-        private const val MAX_CHUNK_CHARS = 280
-        private const val MAX_CHUNK_WORDS = 50
+        // Phase-1 stability caps to keep per-request memory bounded.
+        private const val MAX_CHUNK_CHARS = 120
+        private const val MAX_CHUNK_WORDS = 20
+        private const val MAX_TOTAL_CHUNKS = 80
+        private const val MAX_INPUT_CHARS = 8000
     }
 
     private lateinit var binding: ActivityMainBinding
     private val audioPlayer = AudioPlayer()
     private var initialized = false
+    private var synthesisJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,56 +80,110 @@ class MainActivity : AppCompatActivity() {
             val text = binding.inputEditText.text?.toString()?.trim().orEmpty()
             if (!initialized || text.isEmpty()) return@setOnClickListener
 
+            if (text.length > MAX_INPUT_CHARS) {
+                binding.statusText.text = "Input too long (${text.length} chars). Max: $MAX_INPUT_CHARS"
+                return@setOnClickListener
+            }
+
+            if (synthesisJob?.isActive == true) {
+                binding.statusText.text = "Synthesis already running..."
+                return@setOnClickListener
+            }
+
             binding.speakButton.isEnabled = false
             binding.statusText.text = "Generating..."
 
-            lifecycleScope.launch {
-                val chunks = splitForSynthesis(text)
-                val sampleRate = NativeTts.sampleRate()
-                var totalSamples = 0
-                var totalGenerateMs = 0L
+            synthesisJob = lifecycleScope.launch {
+                var hadFailure = false
+                var wasCancelled = false
 
-                // Reset previous playback session before a new request.
-                audioPlayer.stop()
-
-                for ((index, chunk) in chunks.withIndex()) {
-                    val speed = chooseSpeed(chunk)
-                    binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
-
-                    val genStart = SystemClock.elapsedRealtimeNanos()
-                    val samples = withContext(Dispatchers.Default) {
-                        NativeTts.generate(chunk, speed)
-                    }
-                    val genMs = (SystemClock.elapsedRealtimeNanos() - genStart) / 1_000_000
-                    totalGenerateMs += genMs
-
-                    Log.i(
-                        TAG,
-                        "Generate chunk ${index + 1}/${chunks.size} took ${genMs} ms for ${samples.size} samples (speed=$speed, chars=${chunk.length})"
-                    )
-
-                    if (samples.isEmpty()) {
-                        Log.w(TAG, "Chunk ${index + 1}/${chunks.size} returned empty audio")
-                        continue
+                try {
+                    val rawChunks = splitForSynthesis(text)
+                    val chunks = if (rawChunks.size > MAX_TOTAL_CHUNKS) {
+                        Log.w(
+                            TAG,
+                            "Chunk count ${rawChunks.size} exceeds cap $MAX_TOTAL_CHUNKS. Truncating request."
+                        )
+                        rawChunks.take(MAX_TOTAL_CHUNKS)
+                    } else {
+                        rawChunks
                     }
 
-                    totalSamples += samples.size
+                    val sampleRate = NativeTts.sampleRate()
+                    var totalSamples = 0
+                    var totalGenerateMs = 0L
+                    var playableChunks = 0
 
-                    val playStart = SystemClock.elapsedRealtimeNanos()
-                    withContext(Dispatchers.Default) {
-                        audioPlayer.play(samples, sampleRate)
+                    // Reset previous playback session before a new request.
+                    audioPlayer.stop()
+
+                    for ((index, chunk) in chunks.withIndex()) {
+                        if (!isActive) {
+                            wasCancelled = true
+                            break
+                        }
+
+                        val speed = chooseSpeed(chunk)
+                        binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
+
+                        val genStart = SystemClock.elapsedRealtimeNanos()
+                        val samples = withContext(Dispatchers.Default) {
+                            runCatching { NativeTts.generate(chunk, speed) }
+                                .onFailure { Log.e(TAG, "Generate failed for chunk ${index + 1}", it) }
+                                .getOrDefault(FloatArray(0))
+                        }
+                        val genMs = (SystemClock.elapsedRealtimeNanos() - genStart) / 1_000_000
+                        totalGenerateMs += genMs
+
+                        Log.i(
+                            TAG,
+                            "Generate chunk ${index + 1}/${chunks.size} took ${genMs} ms for ${samples.size} samples (speed=$speed, chars=${chunk.length})"
+                        )
+
+                        if (samples.isEmpty()) {
+                            Log.w(TAG, "Chunk ${index + 1}/${chunks.size} returned empty audio")
+                            hadFailure = true
+                            continue
+                        }
+
+                        totalSamples += samples.size
+
+                        val playStart = SystemClock.elapsedRealtimeNanos()
+                        val playOk = withContext(Dispatchers.Default) {
+                            audioPlayer.play(samples, sampleRate)
+                        }
+                        val playMs = (SystemClock.elapsedRealtimeNanos() - playStart) / 1_000_000
+
+                        if (!playOk) {
+                            Log.e(TAG, "Playback failed for chunk ${index + 1}/${chunks.size}")
+                            hadFailure = true
+                            continue
+                        }
+
+                        playableChunks += 1
+                        Log.i(TAG, "Playback write chunk ${index + 1}/${chunks.size} took ${playMs} ms")
                     }
-                    val playMs = (SystemClock.elapsedRealtimeNanos() - playStart) / 1_000_000
-                    Log.i(TAG, "Playback write chunk ${index + 1}/${chunks.size} took ${playMs} ms")
+
+                    binding.statusText.text = when {
+                        wasCancelled -> "Cancelled"
+                        playableChunks > 0 -> "Done (${chunks.size} chunks, $totalSamples samples, ${totalGenerateMs} ms gen)"
+                        else -> "Generation returned empty audio"
+                    }
+                } catch (ce: CancellationException) {
+                    wasCancelled = true
+                    binding.statusText.text = "Cancelled"
+                    throw ce
+                } catch (t: Throwable) {
+                    hadFailure = true
+                    Log.e(TAG, "Synthesis pipeline failed", t)
+                    binding.statusText.text = "Playback error (${t.javaClass.simpleName})"
+                } finally {
+                    if (hadFailure || wasCancelled) {
+                        audioPlayer.stop()
+                    }
+                    synthesisJob = null
+                    binding.speakButton.isEnabled = initialized
                 }
-
-                if (totalSamples > 0) {
-                    binding.statusText.text = "Done (${chunks.size} chunks, $totalSamples samples, ${totalGenerateMs} ms gen)"
-                } else {
-                    binding.statusText.text = "Generation returned empty audio"
-                }
-
-                binding.speakButton.isEnabled = true
             }
         }
     }
@@ -277,6 +337,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        synthesisJob?.cancel()
         audioPlayer.stop()
         NativeTts.release()
         super.onDestroy()
