@@ -1,15 +1,46 @@
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+*.log
+*.apk
+*.ap_
+*.aab
+*.aar
+*.hprof
+*.keystore
+*.jks
+*.swp
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local configuration
 local.properties
+
+# IntelliJ / Android Studio
+.idea/
+*.ipr
+*.iws
+out/
+
+# Native build artifacts
+.externalNativeBuild/
+.cxx/
+
+# Captures and reports
+captures/
+lint-reports/
+
+# Kotlin
+*.kotlin_module
+
+# NDK
+obj/
+
+# App bundle / APK outputs
+**/release/
+**/debug/
+
+# Temporary files
+tmp/
