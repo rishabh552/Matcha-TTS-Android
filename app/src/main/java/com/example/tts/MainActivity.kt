@@ -11,9 +11,13 @@ import com.example.tts.databinding.ActivityMainBinding
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -27,7 +31,16 @@ class MainActivity : AppCompatActivity() {
         private const val MAX_CHUNK_WORDS = 20
         private const val MAX_TOTAL_CHUNKS = 80
         private const val MAX_INPUT_CHARS = 8000
+
+        // Phase-2: bounded queue to overlap generation with playback.
+        private const val PLAYBACK_QUEUE_CAPACITY = 2
     }
+
+    private data class GeneratedChunk(
+        val index: Int,
+        val total: Int,
+        val samples: FloatArray
+    )
 
     private lateinit var binding: ActivityMainBinding
     private val audioPlayer = AudioPlayer()
@@ -91,11 +104,11 @@ class MainActivity : AppCompatActivity() {
             }
 
             binding.speakButton.isEnabled = false
-            binding.statusText.text = "Generating..."
+            binding.statusText.text = "Preparing synthesis..."
 
             synthesisJob = lifecycleScope.launch {
-                var hadFailure = false
-                var wasCancelled = false
+                val hadFailure = AtomicBoolean(false)
+                val wasCancelled = AtomicBoolean(false)
 
                 try {
                     val rawChunks = splitForSynthesis(text)
@@ -110,75 +123,122 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val sampleRate = NativeTts.sampleRate()
-                    var totalSamples = 0
-                    var totalGenerateMs = 0L
-                    var playableChunks = 0
+                    val chunkQueue = Channel<GeneratedChunk>(capacity = PLAYBACK_QUEUE_CAPACITY)
+
+                    val totalGenerateMs = AtomicLong(0L)
+                    val totalSamples = AtomicInteger(0)
+                    val playableChunks = AtomicInteger(0)
+                    val generatedChunks = AtomicInteger(0)
 
                     // Reset previous playback session before a new request.
                     audioPlayer.stop()
 
-                    for ((index, chunk) in chunks.withIndex()) {
-                        if (!isActive) {
-                            wasCancelled = true
-                            break
+                    val producer = launch(Dispatchers.Default) {
+                        try {
+                            for ((index, chunkText) in chunks.withIndex()) {
+                                if (!isActive) break
+
+                                withContext(Dispatchers.Main) {
+                                    binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
+                                }
+
+                                val speed = chooseSpeed(chunkText)
+                                val genStart = SystemClock.elapsedRealtimeNanos()
+                                val samples = runCatching { NativeTts.generate(chunkText, speed) }
+                                    .onFailure { Log.e(TAG, "Generate failed for chunk ${index + 1}", it) }
+                                    .getOrDefault(FloatArray(0))
+                                val genMs = (SystemClock.elapsedRealtimeNanos() - genStart) / 1_000_000
+
+                                totalGenerateMs.addAndGet(genMs)
+                                generatedChunks.incrementAndGet()
+
+                                Log.i(
+                                    TAG,
+                                    "Generate chunk ${index + 1}/${chunks.size} took ${genMs} ms for ${samples.size} samples (speed=$speed, chars=${chunkText.length})"
+                                )
+
+                                if (samples.isEmpty()) {
+                                    hadFailure.set(true)
+                                    continue
+                                }
+
+                                chunkQueue.send(
+                                    GeneratedChunk(
+                                        index = index + 1,
+                                        total = chunks.size,
+                                        samples = samples
+                                    )
+                                )
+                            }
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (t: Throwable) {
+                            hadFailure.set(true)
+                            Log.e(TAG, "Producer failed", t)
+                        } finally {
+                            chunkQueue.close()
                         }
+                    }
 
-                        val speed = chooseSpeed(chunk)
-                        binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
+                    val consumer = launch(Dispatchers.Default) {
+                        try {
+                            for (chunk in chunkQueue) {
+                                if (!isActive) break
 
-                        val genStart = SystemClock.elapsedRealtimeNanos()
-                        val samples = withContext(Dispatchers.Default) {
-                            runCatching { NativeTts.generate(chunk, speed) }
-                                .onFailure { Log.e(TAG, "Generate failed for chunk ${index + 1}", it) }
-                                .getOrDefault(FloatArray(0))
+                                withContext(Dispatchers.Main) {
+                                    binding.statusText.text = "Playing ${chunk.index}/${chunk.total}..."
+                                }
+
+                                val playStart = SystemClock.elapsedRealtimeNanos()
+                                val playOk = audioPlayer.play(chunk.samples, sampleRate)
+                                val playMs = (SystemClock.elapsedRealtimeNanos() - playStart) / 1_000_000
+
+                                if (!playOk) {
+                                    hadFailure.set(true)
+                                    Log.e(TAG, "Playback failed for chunk ${chunk.index}/${chunk.total}")
+                                    continue
+                                }
+
+                                totalSamples.addAndGet(chunk.samples.size)
+                                playableChunks.incrementAndGet()
+
+                                Log.i(
+                                    TAG,
+                                    "Playback write chunk ${chunk.index}/${chunk.total} took ${playMs} ms"
+                                )
+                            }
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (t: Throwable) {
+                            hadFailure.set(true)
+                            Log.e(TAG, "Consumer failed", t)
                         }
-                        val genMs = (SystemClock.elapsedRealtimeNanos() - genStart) / 1_000_000
-                        totalGenerateMs += genMs
+                    }
 
-                        Log.i(
-                            TAG,
-                            "Generate chunk ${index + 1}/${chunks.size} took ${genMs} ms for ${samples.size} samples (speed=$speed, chars=${chunk.length})"
-                        )
-
-                        if (samples.isEmpty()) {
-                            Log.w(TAG, "Chunk ${index + 1}/${chunks.size} returned empty audio")
-                            hadFailure = true
-                            continue
-                        }
-
-                        totalSamples += samples.size
-
-                        val playStart = SystemClock.elapsedRealtimeNanos()
-                        val playOk = withContext(Dispatchers.Default) {
-                            audioPlayer.play(samples, sampleRate)
-                        }
-                        val playMs = (SystemClock.elapsedRealtimeNanos() - playStart) / 1_000_000
-
-                        if (!playOk) {
-                            Log.e(TAG, "Playback failed for chunk ${index + 1}/${chunks.size}")
-                            hadFailure = true
-                            continue
-                        }
-
-                        playableChunks += 1
-                        Log.i(TAG, "Playback write chunk ${index + 1}/${chunks.size} took ${playMs} ms")
+                    try {
+                        producer.join()
+                        consumer.join()
+                    } catch (ce: CancellationException) {
+                        wasCancelled.set(true)
+                        throw ce
                     }
 
                     binding.statusText.text = when {
-                        wasCancelled -> "Cancelled"
-                        playableChunks > 0 -> "Done (${chunks.size} chunks, $totalSamples samples, ${totalGenerateMs} ms gen)"
+                        wasCancelled.get() -> "Cancelled"
+                        playableChunks.get() > 0 -> "Done (${playableChunks.get()}/${chunks.size} played, ${totalSamples.get()} samples, ${totalGenerateMs.get()} ms gen)"
+                        generatedChunks.get() > 0 -> "Generated audio but playback failed"
                         else -> "Generation returned empty audio"
                     }
                 } catch (ce: CancellationException) {
-                    wasCancelled = true
+                    wasCancelled.set(true)
                     binding.statusText.text = "Cancelled"
                     throw ce
                 } catch (t: Throwable) {
-                    hadFailure = true
+                    hadFailure.set(true)
                     Log.e(TAG, "Synthesis pipeline failed", t)
                     binding.statusText.text = "Playback error (${t.javaClass.simpleName})"
                 } finally {
-                    if (hadFailure || wasCancelled) {
+                    if (hadFailure.get() || wasCancelled.get()) {
                         audioPlayer.stop()
                     }
                     synthesisJob = null
