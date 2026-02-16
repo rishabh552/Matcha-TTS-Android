@@ -12,6 +12,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -20,32 +21,84 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : AppCompatActivity() {
-    companion object {
-        private const val TAG = "MatchaTts"
-        private const val ENGINE_PROVIDER = "cpu"
-        private const val SHORT_TEXT_SPEED = 1.35f
-        private const val NORMAL_TEXT_SPEED = 1.10f
-
-        // Phase-1 stability caps to keep per-request memory bounded.
-        private const val MAX_CHUNK_CHARS = 120
-        private const val MAX_CHUNK_WORDS = 20
-        private const val MAX_TOTAL_CHUNKS = 80
-        private const val MAX_INPUT_CHARS = 8000
-
-        // Phase-2: bounded queue to overlap generation with playback.
-        private const val PLAYBACK_QUEUE_CAPACITY = 2
-    }
-
     private data class GeneratedChunk(
         val index: Int,
         val total: Int,
         val samples: FloatArray
     )
 
+    private data class SynthesisProfile(
+        val name: String,
+        val maxChunkChars: Int,
+        val maxChunkWords: Int,
+        val maxTotalChunks: Int,
+        val queueCapacity: Int,
+        val shortSpeed: Float,
+        val normalSpeed: Float,
+        val longSpeed: Float,
+        val longTextThresholdWords: Int
+    )
+
+    private data class RuntimeProfile(
+        val tier: String,
+        val threads: Int,
+        val synthesis: SynthesisProfile
+    )
+
+    companion object {
+        private const val TAG = "MatchaTts"
+        private const val ENGINE_PROVIDER = "cpu"
+        private const val MAX_INPUT_CHARS = 8000
+
+        private val SENTENCE_SPLIT_REGEX = Regex("(?<=[.!?;:])\\s+")
+        private val WHITESPACE_REGEX = Regex("\\s+")
+
+        private val LOW_TIER_PROFILE = SynthesisProfile(
+            name = "low",
+            maxChunkChars = 120,
+            maxChunkWords = 20,
+            maxTotalChunks = 80,
+            queueCapacity = 2,
+            shortSpeed = 1.35f,
+            normalSpeed = 1.10f,
+            longSpeed = 1.10f,
+            longTextThresholdWords = 120
+        )
+
+        private val MID_TIER_PROFILE = SynthesisProfile(
+            name = "mid",
+            maxChunkChars = 120,
+            maxChunkWords = 20,
+            maxTotalChunks = 80,
+            queueCapacity = 2,
+            shortSpeed = 1.35f,
+            normalSpeed = 1.10f,
+            longSpeed = 1.10f,
+            longTextThresholdWords = 140
+        )
+
+        private val HIGH_TIER_PROFILE = SynthesisProfile(
+            name = "high",
+            maxChunkChars = 120,
+            maxChunkWords = 20,
+            maxTotalChunks = 80,
+            queueCapacity = 2,
+            shortSpeed = 1.35f,
+            normalSpeed = 1.10f,
+            longSpeed = 1.10f,
+            longTextThresholdWords = 160
+        )
+    }
+
     private lateinit var binding: ActivityMainBinding
     private val audioPlayer = AudioPlayer()
     private var initialized = false
     private var synthesisJob: Job? = null
+    private var runtimeProfile = RuntimeProfile(
+        tier = "low",
+        threads = 2,
+        synthesis = LOW_TIER_PROFILE
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,9 +116,10 @@ class MainActivity : AppCompatActivity() {
                     val assetsMs = (SystemClock.elapsedRealtimeNanos() - assetsStart) / 1_000_000
                     Log.i(TAG, "Asset copy/check took ${assetsMs} ms")
 
-                    val preferredThreads = chooseSafeCpuThreads()
+                    runtimeProfile = chooseRuntimeProfile()
+
                     val initStart = SystemClock.elapsedRealtimeNanos()
-                    val initOk = initWithCpuFallback(paths, preferredThreads)
+                    val initOk = initWithCpuFallback(paths, runtimeProfile.threads)
                     val initMs = (SystemClock.elapsedRealtimeNanos() - initStart) / 1_000_000
                     Log.i(TAG, "Native init took ${initMs} ms")
 
@@ -85,8 +139,9 @@ class MainActivity : AppCompatActivity() {
 
             val provider = NativeTts.runtimeProvider()
             val threads = NativeTts.runtimeThreads()
+            val synthesis = runtimeProfile.synthesis
             binding.speakButton.isEnabled = true
-            binding.statusText.text = "Ready (${NativeTts.sampleRate()} Hz, $provider/$threads, uncached)"
+            binding.statusText.text = "Ready (${NativeTts.sampleRate()} Hz, $provider/$threads, ${synthesis.name} profile)"
         }
 
         binding.speakButton.setOnClickListener {
@@ -111,26 +166,34 @@ class MainActivity : AppCompatActivity() {
                 val wasCancelled = AtomicBoolean(false)
 
                 try {
-                    val rawChunks = splitForSynthesis(text)
-                    val chunks = if (rawChunks.size > MAX_TOTAL_CHUNKS) {
+                    val requestStartNs = SystemClock.elapsedRealtimeNanos()
+                    val synthesis = runtimeProfile.synthesis
+                    val inputWords = countWords(text)
+
+                    val rawChunks = splitForSynthesis(
+                        text = text,
+                        maxChunkChars = synthesis.maxChunkChars,
+                        maxChunkWords = synthesis.maxChunkWords
+                    )
+                    val chunks = if (rawChunks.size > synthesis.maxTotalChunks) {
                         Log.w(
                             TAG,
-                            "Chunk count ${rawChunks.size} exceeds cap $MAX_TOTAL_CHUNKS. Truncating request."
+                            "Chunk count ${rawChunks.size} exceeds cap ${synthesis.maxTotalChunks}. Truncating request."
                         )
-                        rawChunks.take(MAX_TOTAL_CHUNKS)
+                        rawChunks.take(synthesis.maxTotalChunks)
                     } else {
                         rawChunks
                     }
 
                     val sampleRate = NativeTts.sampleRate()
-                    val chunkQueue = Channel<GeneratedChunk>(capacity = PLAYBACK_QUEUE_CAPACITY)
+                    val chunkQueue = Channel<GeneratedChunk>(capacity = synthesis.queueCapacity)
 
                     val totalGenerateMs = AtomicLong(0L)
                     val totalSamples = AtomicInteger(0)
                     val playableChunks = AtomicInteger(0)
                     val generatedChunks = AtomicInteger(0)
+                    val firstAudioMs = AtomicLong(-1L)
 
-                    // Reset previous playback session before a new request.
                     audioPlayer.stop()
 
                     val producer = launch(Dispatchers.Default) {
@@ -142,7 +205,7 @@ class MainActivity : AppCompatActivity() {
                                     binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
                                 }
 
-                                val speed = chooseSpeed(chunkText)
+                                val speed = chooseSpeed(chunkText, inputWords, synthesis)
                                 val genStart = SystemClock.elapsedRealtimeNanos()
                                 val samples = runCatching { NativeTts.generate(chunkText, speed) }
                                     .onFailure { Log.e(TAG, "Generate failed for chunk ${index + 1}", it) }
@@ -162,13 +225,18 @@ class MainActivity : AppCompatActivity() {
                                     continue
                                 }
 
-                                chunkQueue.send(
-                                    GeneratedChunk(
-                                        index = index + 1,
-                                        total = chunks.size,
-                                        samples = samples
+                                try {
+                                    chunkQueue.send(
+                                        GeneratedChunk(
+                                            index = index + 1,
+                                            total = chunks.size,
+                                            samples = samples
+                                        )
                                     )
-                                )
+                                } catch (closed: ClosedSendChannelException) {
+                                    Log.w(TAG, "Playback queue closed. Stopping generation.")
+                                    break
+                                }
                             }
                         } catch (ce: CancellationException) {
                             throw ce
@@ -189,6 +257,11 @@ class MainActivity : AppCompatActivity() {
                                     binding.statusText.text = "Playing ${chunk.index}/${chunk.total}..."
                                 }
 
+                                if (firstAudioMs.get() < 0L) {
+                                    val nowMs = (SystemClock.elapsedRealtimeNanos() - requestStartNs) / 1_000_000
+                                    firstAudioMs.compareAndSet(-1L, nowMs)
+                                }
+
                                 val playStart = SystemClock.elapsedRealtimeNanos()
                                 val playOk = audioPlayer.play(chunk.samples, sampleRate)
                                 val playMs = (SystemClock.elapsedRealtimeNanos() - playStart) / 1_000_000
@@ -196,9 +269,9 @@ class MainActivity : AppCompatActivity() {
                                 if (!playOk) {
                                     hadFailure.set(true)
                                     Log.e(TAG, "Playback failed for chunk ${chunk.index}/${chunk.total}")
-                                    continue
+                                    chunkQueue.cancel(CancellationException("Playback failed"))
+                                    break
                                 }
-
                                 totalSamples.addAndGet(chunk.samples.size)
                                 playableChunks.incrementAndGet()
 
@@ -211,6 +284,10 @@ class MainActivity : AppCompatActivity() {
                             throw ce
                         } catch (t: Throwable) {
                             hadFailure.set(true)
+                            val cancelCause = CancellationException("Consumer failed").apply {
+                                initCause(t)
+                            }
+                            chunkQueue.cancel(cancelCause)
                             Log.e(TAG, "Consumer failed", t)
                         }
                     }
@@ -223,9 +300,12 @@ class MainActivity : AppCompatActivity() {
                         throw ce
                     }
 
+                    val wallMs = (SystemClock.elapsedRealtimeNanos() - requestStartNs) / 1_000_000
+                    val firstMs = firstAudioMs.get()
+
                     binding.statusText.text = when {
                         wasCancelled.get() -> "Cancelled"
-                        playableChunks.get() > 0 -> "Done (${playableChunks.get()}/${chunks.size} played, ${totalSamples.get()} samples, ${totalGenerateMs.get()} ms gen)"
+                        playableChunks.get() > 0 -> "Done (${playableChunks.get()}/${chunks.size} played, first=${if (firstMs >= 0) "${firstMs}ms" else "-"}, wall=${wallMs}ms, gen=${totalGenerateMs.get()}ms)"
                         generatedChunks.get() > 0 -> "Generated audio but playback failed"
                         else -> "Generation returned empty audio"
                     }
@@ -282,7 +362,7 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun chooseSafeCpuThreads(): Int {
+    private fun chooseRuntimeProfile(): RuntimeProfile {
         val activityManager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
         val memClass = activityManager.memoryClass
         val cores = Runtime.getRuntime().availableProcessors()
@@ -293,31 +373,58 @@ class MainActivity : AppCompatActivity() {
         val isSd460Like = hw.contains("sm4250") || board.contains("sm4250") ||
             product.contains("sm4250") || hw.contains("sdm460") || board.contains("sdm460")
 
-        val threads = if (isSd460Like || memClass <= 192 || cores <= 4) 2 else 4
+        val runtimeProfile = when {
+            isSd460Like || memClass <= 192 || cores <= 4 -> RuntimeProfile(
+                tier = "low",
+                threads = 2,
+                synthesis = LOW_TIER_PROFILE
+            )
+
+            cores >= 8 && memClass >= 256 -> RuntimeProfile(
+                tier = "high",
+                threads = 4,
+                synthesis = HIGH_TIER_PROFILE
+            )
+
+            else -> RuntimeProfile(
+                tier = "mid",
+                threads = 4,
+                synthesis = MID_TIER_PROFILE
+            )
+        }
+
         Log.i(
             TAG,
-            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, memClass=${memClass}MB, cores=$cores -> cpu/$threads"
+            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, memClass=${memClass}MB, cores=$cores -> cpu/${runtimeProfile.threads}, synthesis=${runtimeProfile.synthesis.name}(chars=${runtimeProfile.synthesis.maxChunkChars}, words=${runtimeProfile.synthesis.maxChunkWords}, maxChunks=${runtimeProfile.synthesis.maxTotalChunks}, queue=${runtimeProfile.synthesis.queueCapacity})"
         )
-        return threads
+
+        return runtimeProfile
     }
 
-    private fun chooseSpeed(text: String): Float {
+    private fun chooseSpeed(text: String, totalInputWords: Int, profile: SynthesisProfile): Float {
         val words = countWords(text)
-        return if (text.length <= 32 && words <= 5) SHORT_TEXT_SPEED else NORMAL_TEXT_SPEED
+        return when {
+            text.length <= 32 && words <= 5 -> profile.shortSpeed
+            totalInputWords >= profile.longTextThresholdWords && words >= 8 -> profile.longSpeed
+            else -> profile.normalSpeed
+        }
     }
 
-    private fun splitForSynthesis(text: String): List<String> {
-        if (text.length <= MAX_CHUNK_CHARS && countWords(text) <= MAX_CHUNK_WORDS) {
+    private fun splitForSynthesis(
+        text: String,
+        maxChunkChars: Int,
+        maxChunkWords: Int
+    ): List<String> {
+        if (text.length <= maxChunkChars && countWords(text) <= maxChunkWords) {
             return listOf(text)
         }
 
-        val sentenceRegex = Regex("(?<=[.!?;:])\\s+")
-        val sentences = text.split(sentenceRegex)
+        val sentences = text.split(SENTENCE_SPLIT_REGEX)
             .map { it.trim() }
             .filter { it.isNotEmpty() }
 
         if (sentences.isEmpty()) {
-            return splitLongSentence(text)
+            return splitLongSentence(text, maxChunkChars, maxChunkWords)
         }
 
         val chunks = mutableListOf<String>()
@@ -335,14 +442,14 @@ class MainActivity : AppCompatActivity() {
         for (sentence in sentences) {
             val sentenceWords = countWords(sentence)
 
-            if (sentence.length > MAX_CHUNK_CHARS || sentenceWords > MAX_CHUNK_WORDS) {
+            if (sentence.length > maxChunkChars || sentenceWords > maxChunkWords) {
                 flushCurrent()
-                chunks += splitLongSentence(sentence)
+                chunks += splitLongSentence(sentence, maxChunkChars, maxChunkWords)
                 continue
             }
 
             val nextLen = if (current.isEmpty()) sentence.length else current.length + 1 + sentence.length
-            if (nextLen > MAX_CHUNK_CHARS || currentWords + sentenceWords > MAX_CHUNK_WORDS) {
+            if (nextLen > maxChunkChars || currentWords + sentenceWords > maxChunkWords) {
                 flushCurrent()
             }
 
@@ -354,11 +461,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         flushCurrent()
-        return if (chunks.isNotEmpty()) chunks else splitLongSentence(text)
+        return if (chunks.isNotEmpty()) chunks else splitLongSentence(text, maxChunkChars, maxChunkWords)
     }
 
-    private fun splitLongSentence(text: String): List<String> {
-        val words = text.split(Regex("\\s+"))
+    private fun splitLongSentence(
+        text: String,
+        maxChunkChars: Int,
+        maxChunkWords: Int
+    ): List<String> {
+        val words = text.split(WHITESPACE_REGEX)
             .map { it.trim() }
             .filter { it.isNotEmpty() }
 
@@ -372,7 +483,7 @@ class MainActivity : AppCompatActivity() {
 
         for (word in words) {
             val nextLen = if (current.isEmpty()) word.length else current.length + 1 + word.length
-            if ((nextLen > MAX_CHUNK_CHARS || currentWords >= MAX_CHUNK_WORDS) && current.isNotEmpty()) {
+            if ((nextLen > maxChunkChars || currentWords >= maxChunkWords) && current.isNotEmpty()) {
                 chunks += current.toString()
                 current.clear()
                 currentWords = 0
@@ -393,7 +504,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun countWords(text: String): Int {
-        return text.split(Regex("\\s+")).count { it.isNotEmpty() }
+        return text.split(WHITESPACE_REGEX).count { it.isNotEmpty() }
     }
 
     override fun onDestroy() {

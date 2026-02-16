@@ -13,45 +13,58 @@ class AudioPlayer {
         private const val PCM16_CONVERT_CHUNK_SAMPLES = 4096
     }
 
+    private val stateLock = Any()
     private var track: AudioTrack? = null
     private var currentSampleRate: Int = 0
     private var currentEncoding: Int = AudioFormat.ENCODING_INVALID
 
-    @Synchronized
     fun play(samples: FloatArray, sampleRate: Int): Boolean {
         if (samples.isEmpty()) return true
 
-        val audioTrack = ensureTrack(sampleRate) ?: return false
+        val (audioTrack, encoding) = ensureTrack(sampleRate) ?: return false
 
-        return if (currentEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+        return if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
             writeFloat(audioTrack, samples)
         } else {
             writePcm16(audioTrack, samples)
         }
     }
 
-    @Synchronized
-    private fun ensureTrack(sampleRate: Int): AudioTrack? {
-        if (track != null && currentSampleRate == sampleRate) {
-            return track
+    private fun ensureTrack(sampleRate: Int): Pair<AudioTrack, Int>? {
+        synchronized(stateLock) {
+            val existing = track
+            if (existing != null && currentSampleRate == sampleRate) {
+                return existing to currentEncoding
+            }
         }
 
-        stop()
+        val oldTrack = synchronized(stateLock) {
+            val old = track
+            track = null
+            currentSampleRate = 0
+            currentEncoding = AudioFormat.ENCODING_INVALID
+            old
+        }
+        releaseTrack(oldTrack)
 
-        buildTrack(sampleRate, AudioFormat.ENCODING_PCM_FLOAT)?.let {
-            track = it
-            currentSampleRate = sampleRate
-            currentEncoding = AudioFormat.ENCODING_PCM_FLOAT
+        buildTrack(sampleRate, AudioFormat.ENCODING_PCM_FLOAT)?.let { newTrack ->
+            synchronized(stateLock) {
+                track = newTrack
+                currentSampleRate = sampleRate
+                currentEncoding = AudioFormat.ENCODING_PCM_FLOAT
+            }
             Log.i(TAG, "Using float AudioTrack @${sampleRate}Hz")
-            return it
+            return newTrack to AudioFormat.ENCODING_PCM_FLOAT
         }
 
-        buildTrack(sampleRate, AudioFormat.ENCODING_PCM_16BIT)?.let {
-            track = it
-            currentSampleRate = sampleRate
-            currentEncoding = AudioFormat.ENCODING_PCM_16BIT
+        buildTrack(sampleRate, AudioFormat.ENCODING_PCM_16BIT)?.let { newTrack ->
+            synchronized(stateLock) {
+                track = newTrack
+                currentSampleRate = sampleRate
+                currentEncoding = AudioFormat.ENCODING_PCM_16BIT
+            }
             Log.w(TAG, "Float AudioTrack unavailable. Falling back to PCM16 @${sampleRate}Hz")
-            return it
+            return newTrack to AudioFormat.ENCODING_PCM_16BIT
         }
 
         Log.e(TAG, "Failed to create AudioTrack for sampleRate=$sampleRate")
@@ -151,17 +164,36 @@ class AudioPlayer {
         return true
     }
 
-    @Synchronized
     fun stop() {
-        track?.let {
-            try {
-                it.stop()
-            } catch (_: IllegalStateException) {
-            }
-            it.release()
+        val oldTrack = synchronized(stateLock) {
+            val old = track
+            track = null
+            currentSampleRate = 0
+            currentEncoding = AudioFormat.ENCODING_INVALID
+            old
         }
-        track = null
-        currentSampleRate = 0
-        currentEncoding = AudioFormat.ENCODING_INVALID
+
+        releaseTrack(oldTrack)
+    }
+
+    private fun releaseTrack(audioTrack: AudioTrack?) {
+        if (audioTrack == null) return
+
+        try {
+            audioTrack.pause()
+        } catch (_: IllegalStateException) {
+        }
+
+        try {
+            audioTrack.flush()
+        } catch (_: IllegalStateException) {
+        }
+
+        try {
+            audioTrack.stop()
+        } catch (_: IllegalStateException) {
+        }
+
+        audioTrack.release()
     }
 }
