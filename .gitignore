@@ -44,3 +44,42 @@ obj/
 
 # Temporary files
 tmp/
+
+
+# Additional local IDE/editor noise
+.vscode/
+.kotlin/
+
+# Android Studio local workspace churn
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/shelf/
+.idea/deploymentTargetDropDown.xml
+.idea/deploymentTargetSelector.xml
+
+# Local diagnostics / profiling outputs
+logcat*.txt
+*.trace
+*.systrace
+*.perfetto-trace
+
+# Patch/merge leftovers
+*.orig
+*.rej
+*.tmp
+*.temp
+*.bak
+
+
+# Offline model assets (publish source-only)
+model.tar.bz2
+
+app/src/main/assets/kokoro/**
+!app/src/main/assets/kokoro/
+!app/src/main/assets/kokoro/.gitkeep
+!app/src/main/assets/kokoro/README.md
+
+app/src/main/assets/matcha/**
+!app/src/main/assets/matcha/
+!app/src/main/assets/matcha/.gitkeep
+!app/src/main/assets/matcha/README.md
