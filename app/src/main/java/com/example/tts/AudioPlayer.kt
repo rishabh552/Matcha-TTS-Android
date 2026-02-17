@@ -8,8 +8,9 @@ import android.util.Log
 class AudioPlayer {
     companion object {
         private const val TAG = "MatchaAudio"
-        private const val MIN_STREAM_BUFFER_BYTES = 256 * 1024
-        private const val STREAM_BUFFER_MULTIPLIER = 4
+        private const val MIN_STREAM_BUFFER_BYTES = 4 * 1024
+        private const val STREAM_BUFFER_MULTIPLIER = 2
+        private const val TARGET_STREAM_BUFFER_MS = 120
         private const val PCM16_CONVERT_CHUNK_SAMPLES = 4096
     }
 
@@ -27,6 +28,25 @@ class AudioPlayer {
             writeFloat(audioTrack, samples)
         } else {
             writePcm16(audioTrack, samples)
+        }
+    }
+
+    fun resetForRequest(sampleRate: Int) {
+        val (audioTrack, _) = ensureTrack(sampleRate) ?: return
+
+        try {
+            audioTrack.pause()
+        } catch (_: IllegalStateException) {
+        }
+
+        try {
+            audioTrack.flush()
+        } catch (_: IllegalStateException) {
+        }
+
+        try {
+            audioTrack.play()
+        } catch (_: IllegalStateException) {
         }
     }
 
@@ -83,9 +103,19 @@ class AudioPlayer {
             return null
         }
 
+        val bytesPerSample = when (encoding) {
+            AudioFormat.ENCODING_PCM_FLOAT -> 4
+            AudioFormat.ENCODING_PCM_16BIT -> 2
+            else -> 2
+        }
+
+        val targetBufferBytes =
+            (sampleRate * bytesPerSample * TARGET_STREAM_BUFFER_MS / 1000)
+                .coerceAtLeast(MIN_STREAM_BUFFER_BYTES)
+
         val bufferSize = maxOf(
             minBufferSize * STREAM_BUFFER_MULTIPLIER,
-            MIN_STREAM_BUFFER_BYTES
+            targetBufferBytes
         )
 
         val audioFormat = AudioFormat.Builder()
@@ -106,7 +136,13 @@ class AudioPlayer {
                 .setBufferSizeInBytes(bufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
-                .also { it.play() }
+                .also {
+                    it.play()
+                    Log.i(
+                        TAG,
+                        "AudioTrack built: encoding=$encoding minBuffer=$minBufferSize buffer=$bufferSize target=${TARGET_STREAM_BUFFER_MS}ms"
+                    )
+                }
         } catch (t: Throwable) {
             Log.e(TAG, "AudioTrack build failed (encoding=$encoding, buffer=$bufferSize)", t)
             null

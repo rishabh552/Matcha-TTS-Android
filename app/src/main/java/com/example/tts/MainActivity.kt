@@ -52,6 +52,12 @@ class MainActivity : AppCompatActivity() {
 
         private val SENTENCE_SPLIT_REGEX = Regex("(?<=[.!?;:])\\s+")
         private val WHITESPACE_REGEX = Regex("\\s+")
+        private val TERMINAL_PUNCTUATION = setOf('.', '!', '?', ';', ':')
+
+        private const val SHORT_UTTERANCE_MAX_MS = 1800L
+        private const val SHORT_UTTERANCE_PREROLL_MS = 320L
+        private const val SHORT_UTTERANCE_POSTROLL_MS = 180L
+        private const val VERY_SHORT_SPEED = 0.90f
 
         private val LOW_TIER_PROFILE = SynthesisProfile(
             name = "low",
@@ -59,7 +65,7 @@ class MainActivity : AppCompatActivity() {
             maxChunkWords = 20,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.35f,
+            shortSpeed = 1.10f,
             normalSpeed = 1.10f,
             longSpeed = 1.10f,
             longTextThresholdWords = 120
@@ -71,7 +77,7 @@ class MainActivity : AppCompatActivity() {
             maxChunkWords = 20,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.35f,
+            shortSpeed = 1.10f,
             normalSpeed = 1.10f,
             longSpeed = 1.10f,
             longTextThresholdWords = 140
@@ -83,7 +89,7 @@ class MainActivity : AppCompatActivity() {
             maxChunkWords = 20,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.35f,
+            shortSpeed = 1.10f,
             normalSpeed = 1.10f,
             longSpeed = 1.10f,
             longTextThresholdWords = 160
@@ -194,7 +200,7 @@ class MainActivity : AppCompatActivity() {
                     val generatedChunks = AtomicInteger(0)
                     val firstAudioMs = AtomicLong(-1L)
 
-                    audioPlayer.stop()
+                    audioPlayer.resetForRequest(sampleRate)
 
                     val producer = launch(Dispatchers.Default) {
                         try {
@@ -205,9 +211,10 @@ class MainActivity : AppCompatActivity() {
                                     binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
                                 }
 
-                                val speed = chooseSpeed(chunkText, inputWords, synthesis)
+                                val preparedChunk = ensureTerminalPunctuation(chunkText.trim())
+                                val speed = chooseSpeed(preparedChunk, inputWords, synthesis)
                                 val genStart = SystemClock.elapsedRealtimeNanos()
-                                val samples = runCatching { NativeTts.generate(chunkText, speed) }
+                                val samples = runCatching { NativeTts.generate(preparedChunk, speed) }
                                     .onFailure { Log.e(TAG, "Generate failed for chunk ${index + 1}", it) }
                                     .getOrDefault(FloatArray(0))
                                 val genMs = (SystemClock.elapsedRealtimeNanos() - genStart) / 1_000_000
@@ -217,7 +224,7 @@ class MainActivity : AppCompatActivity() {
 
                                 Log.i(
                                     TAG,
-                                    "Generate chunk ${index + 1}/${chunks.size} took ${genMs} ms for ${samples.size} samples (speed=$speed, chars=${chunkText.length})"
+                                    "Generate chunk ${index + 1}/${chunks.size} took ${genMs} ms for ${samples.size} samples (speed=$speed, chars=${preparedChunk.length})"
                                 )
 
                                 if (samples.isEmpty()) {
@@ -262,8 +269,15 @@ class MainActivity : AppCompatActivity() {
                                     firstAudioMs.compareAndSet(-1L, nowMs)
                                 }
 
+                                val playbackSamples = withShortUtterancePreroll(
+                                    samples = chunk.samples,
+                                    sampleRate = sampleRate,
+                                    chunkIndex = chunk.index,
+                                    totalChunks = chunk.total
+                                )
+
                                 val playStart = SystemClock.elapsedRealtimeNanos()
-                                val playOk = audioPlayer.play(chunk.samples, sampleRate)
+                                val playOk = audioPlayer.play(playbackSamples, sampleRate)
                                 val playMs = (SystemClock.elapsedRealtimeNanos() - playStart) / 1_000_000
 
                                 if (!playOk) {
@@ -272,7 +286,7 @@ class MainActivity : AppCompatActivity() {
                                     chunkQueue.cancel(CancellationException("Playback failed"))
                                     break
                                 }
-                                totalSamples.addAndGet(chunk.samples.size)
+                                totalSamples.addAndGet(playbackSamples.size)
                                 playableChunks.incrementAndGet()
 
                                 Log.i(
@@ -404,6 +418,7 @@ class MainActivity : AppCompatActivity() {
     private fun chooseSpeed(text: String, totalInputWords: Int, profile: SynthesisProfile): Float {
         val words = countWords(text)
         return when {
+            words <= 2 -> VERY_SHORT_SPEED
             text.length <= 32 && words <= 5 -> profile.shortSpeed
             totalInputWords >= profile.longTextThresholdWords && words >= 8 -> profile.longSpeed
             else -> profile.normalSpeed
@@ -501,6 +516,42 @@ class MainActivity : AppCompatActivity() {
         }
 
         return chunks
+    }
+
+    private fun ensureTerminalPunctuation(text: String): String {
+        if (text.isEmpty()) return text
+        if (TERMINAL_PUNCTUATION.contains(text.last())) return text
+        return "$text."
+    }
+
+    private fun withShortUtterancePreroll(
+        samples: FloatArray,
+        sampleRate: Int,
+        chunkIndex: Int,
+        totalChunks: Int
+    ): FloatArray {
+        if (samples.isEmpty() || sampleRate <= 0) return samples
+        if (totalChunks != 1 || chunkIndex != 1) return samples
+
+        val durationMs = (samples.size * 1000L) / sampleRate
+        if (durationMs >= SHORT_UTTERANCE_MAX_MS) return samples
+
+        val preRollSamples = ((sampleRate * SHORT_UTTERANCE_PREROLL_MS) / 1000L)
+            .toInt()
+            .coerceAtLeast(1)
+        val postRollSamples = ((sampleRate * SHORT_UTTERANCE_POSTROLL_MS) / 1000L)
+            .toInt()
+            .coerceAtLeast(1)
+
+        val out = FloatArray(preRollSamples + samples.size + postRollSamples)
+        System.arraycopy(samples, 0, out, preRollSamples, samples.size)
+
+        Log.i(
+            TAG,
+            "Applied short-utterance guard (duration=${durationMs}ms, pre=${SHORT_UTTERANCE_PREROLL_MS}ms, post=${SHORT_UTTERANCE_POSTROLL_MS}ms, samples=${samples.size}->${out.size})"
+        )
+
+        return out
     }
 
     private fun countWords(text: String): Int {
