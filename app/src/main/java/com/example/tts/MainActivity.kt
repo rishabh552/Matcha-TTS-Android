@@ -42,7 +42,8 @@ class MainActivity : AppCompatActivity() {
     private data class RuntimeProfile(
         val tier: String,
         val threads: Int,
-        val synthesis: SynthesisProfile
+        val synthesis: SynthesisProfile,
+        val useA23ShortUtteranceWorkaround: Boolean
     )
 
     companion object {
@@ -103,7 +104,8 @@ class MainActivity : AppCompatActivity() {
     private var runtimeProfile = RuntimeProfile(
         tier = "low",
         threads = 2,
-        synthesis = LOW_TIER_PROFILE
+        synthesis = LOW_TIER_PROFILE,
+        useA23ShortUtteranceWorkaround = false
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -123,6 +125,7 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "Asset copy/check took ${assetsMs} ms")
 
                     runtimeProfile = chooseRuntimeProfile()
+                    audioPlayer.setLowLatencyBufferMode(runtimeProfile.useA23ShortUtteranceWorkaround)
 
                     val initStart = SystemClock.elapsedRealtimeNanos()
                     val initOk = initWithCpuFallback(paths, runtimeProfile.threads)
@@ -200,7 +203,9 @@ class MainActivity : AppCompatActivity() {
                     val generatedChunks = AtomicInteger(0)
                     val firstAudioMs = AtomicLong(-1L)
 
-                    audioPlayer.resetForRequest(sampleRate)
+                    if (runtimeProfile.useA23ShortUtteranceWorkaround) {
+                        audioPlayer.resetForRequest(sampleRate)
+                    }
 
                     val producer = launch(Dispatchers.Default) {
                         try {
@@ -211,8 +216,19 @@ class MainActivity : AppCompatActivity() {
                                     binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
                                 }
 
-                                val preparedChunk = ensureTerminalPunctuation(chunkText.trim())
-                                val speed = chooseSpeed(preparedChunk, inputWords, synthesis)
+                                val preparedChunk = if (runtimeProfile.useA23ShortUtteranceWorkaround) {
+                                    ensureTerminalPunctuation(chunkText.trim())
+                                } else {
+                                    chunkText.trim()
+                                }
+
+                                val speed = chooseSpeed(
+                                    text = preparedChunk,
+                                    totalInputWords = inputWords,
+                                    profile = synthesis,
+                                    applyVeryShortOverride = runtimeProfile.useA23ShortUtteranceWorkaround
+                                )
+
                                 val genStart = SystemClock.elapsedRealtimeNanos()
                                 val samples = runCatching { NativeTts.generate(preparedChunk, speed) }
                                     .onFailure { Log.e(TAG, "Generate failed for chunk ${index + 1}", it) }
@@ -269,12 +285,16 @@ class MainActivity : AppCompatActivity() {
                                     firstAudioMs.compareAndSet(-1L, nowMs)
                                 }
 
-                                val playbackSamples = withShortUtterancePreroll(
-                                    samples = chunk.samples,
-                                    sampleRate = sampleRate,
-                                    chunkIndex = chunk.index,
-                                    totalChunks = chunk.total
-                                )
+                                val playbackSamples = if (runtimeProfile.useA23ShortUtteranceWorkaround) {
+                                    withShortUtterancePreroll(
+                                        samples = chunk.samples,
+                                        sampleRate = sampleRate,
+                                        chunkIndex = chunk.index,
+                                        totalChunks = chunk.total
+                                    )
+                                } else {
+                                    chunk.samples
+                                }
 
                                 val playStart = SystemClock.elapsedRealtimeNanos()
                                 val playOk = audioPlayer.play(playbackSamples, sampleRate)
@@ -384,41 +404,64 @@ class MainActivity : AppCompatActivity() {
         val hw = Build.HARDWARE.lowercase()
         val board = Build.BOARD.lowercase()
         val product = Build.PRODUCT.lowercase()
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        val model = Build.MODEL.lowercase()
+        val device = Build.DEVICE.lowercase()
+
         val isSd460Like = hw.contains("sm4250") || board.contains("sm4250") ||
             product.contains("sm4250") || hw.contains("sdm460") || board.contains("sdm460")
+
+        val isSamsungA23 = manufacturer.contains("samsung") && (
+            model.contains("a23") ||
+                model.contains("sm-a23") ||
+                model.contains("sm-a235") ||
+                model.contains("sm-a236") ||
+                device.contains("a23") ||
+                product.contains("a23") ||
+                product.contains("a235") ||
+                product.contains("a236")
+            )
 
         val runtimeProfile = when {
             isSd460Like || memClass <= 192 || cores <= 4 -> RuntimeProfile(
                 tier = "low",
                 threads = 2,
-                synthesis = LOW_TIER_PROFILE
+                synthesis = LOW_TIER_PROFILE,
+                useA23ShortUtteranceWorkaround = isSamsungA23
             )
 
             cores >= 8 && memClass >= 256 -> RuntimeProfile(
                 tier = "high",
                 threads = 4,
-                synthesis = HIGH_TIER_PROFILE
+                synthesis = HIGH_TIER_PROFILE,
+                useA23ShortUtteranceWorkaround = isSamsungA23
             )
 
             else -> RuntimeProfile(
                 tier = "mid",
                 threads = 4,
-                synthesis = MID_TIER_PROFILE
+                synthesis = MID_TIER_PROFILE,
+                useA23ShortUtteranceWorkaround = isSamsungA23
             )
         }
 
         Log.i(
             TAG,
-            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, memClass=${memClass}MB, cores=$cores -> cpu/${runtimeProfile.threads}, synthesis=${runtimeProfile.synthesis.name}(chars=${runtimeProfile.synthesis.maxChunkChars}, words=${runtimeProfile.synthesis.maxChunkWords}, maxChunks=${runtimeProfile.synthesis.maxTotalChunks}, queue=${runtimeProfile.synthesis.queueCapacity})"
+            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, model=${Build.MODEL}, memClass=${memClass}MB, cores=$cores -> cpu/${runtimeProfile.threads}, synthesis=${runtimeProfile.synthesis.name}(chars=${runtimeProfile.synthesis.maxChunkChars}, words=${runtimeProfile.synthesis.maxChunkWords}, maxChunks=${runtimeProfile.synthesis.maxTotalChunks}, queue=${runtimeProfile.synthesis.queueCapacity}), a23_workaround=${runtimeProfile.useA23ShortUtteranceWorkaround}"
         )
 
         return runtimeProfile
     }
 
-    private fun chooseSpeed(text: String, totalInputWords: Int, profile: SynthesisProfile): Float {
+    private fun chooseSpeed(
+        text: String,
+        totalInputWords: Int,
+        profile: SynthesisProfile,
+        applyVeryShortOverride: Boolean
+    ): Float {
         val words = countWords(text)
         return when {
-            words <= 2 -> VERY_SHORT_SPEED
+            applyVeryShortOverride && words <= 2 -> VERY_SHORT_SPEED
             text.length <= 32 && words <= 5 -> profile.shortSpeed
             totalInputWords >= profile.longTextThresholdWords && words >= 8 -> profile.longSpeed
             else -> profile.normalSpeed

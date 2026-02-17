@@ -9,8 +9,13 @@ class AudioPlayer {
     companion object {
         private const val TAG = "MatchaAudio"
         private const val MIN_STREAM_BUFFER_BYTES = 4 * 1024
-        private const val STREAM_BUFFER_MULTIPLIER = 2
-        private const val TARGET_STREAM_BUFFER_MS = 120
+
+        private const val DEFAULT_STREAM_BUFFER_MULTIPLIER = 4
+        private const val DEFAULT_TARGET_STREAM_BUFFER_MS = 220
+
+        private const val WORKAROUND_STREAM_BUFFER_MULTIPLIER = 2
+        private const val WORKAROUND_TARGET_STREAM_BUFFER_MS = 120
+
         private const val PCM16_CONVERT_CHUNK_SAMPLES = 4096
     }
 
@@ -18,6 +23,26 @@ class AudioPlayer {
     private var track: AudioTrack? = null
     private var currentSampleRate: Int = 0
     private var currentEncoding: Int = AudioFormat.ENCODING_INVALID
+    private var useLowLatencyBufferMode: Boolean = false
+
+    fun setLowLatencyBufferMode(enabled: Boolean) {
+        val oldTrack = synchronized(stateLock) {
+            if (useLowLatencyBufferMode == enabled) {
+                return
+            }
+
+            useLowLatencyBufferMode = enabled
+            val old = track
+            track = null
+            currentSampleRate = 0
+            currentEncoding = AudioFormat.ENCODING_INVALID
+            old
+        }
+
+        releaseTrack(oldTrack)
+
+        Log.i(TAG, "Audio buffer mode set to ${if (enabled) "low-latency" else "default"}")
+    }
 
     fun play(samples: FloatArray, sampleRate: Int): Boolean {
         if (samples.isEmpty()) return true
@@ -109,12 +134,24 @@ class AudioPlayer {
             else -> 2
         }
 
+        val useLowLatencyMode = synchronized(stateLock) { useLowLatencyBufferMode }
+        val streamBufferMultiplier = if (useLowLatencyMode) {
+            WORKAROUND_STREAM_BUFFER_MULTIPLIER
+        } else {
+            DEFAULT_STREAM_BUFFER_MULTIPLIER
+        }
+        val targetStreamBufferMs = if (useLowLatencyMode) {
+            WORKAROUND_TARGET_STREAM_BUFFER_MS
+        } else {
+            DEFAULT_TARGET_STREAM_BUFFER_MS
+        }
+
         val targetBufferBytes =
-            (sampleRate * bytesPerSample * TARGET_STREAM_BUFFER_MS / 1000)
+            (sampleRate * bytesPerSample * targetStreamBufferMs / 1000)
                 .coerceAtLeast(MIN_STREAM_BUFFER_BYTES)
 
         val bufferSize = maxOf(
-            minBufferSize * STREAM_BUFFER_MULTIPLIER,
+            minBufferSize * streamBufferMultiplier,
             targetBufferBytes
         )
 
@@ -140,7 +177,7 @@ class AudioPlayer {
                     it.play()
                     Log.i(
                         TAG,
-                        "AudioTrack built: encoding=$encoding minBuffer=$minBufferSize buffer=$bufferSize target=${TARGET_STREAM_BUFFER_MS}ms"
+                        "AudioTrack built: encoding=$encoding minBuffer=$minBufferSize buffer=$bufferSize target=${targetStreamBufferMs}ms mode=${if (useLowLatencyMode) "low-latency" else "default"}"
                     )
                 }
         } catch (t: Throwable) {
