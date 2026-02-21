@@ -8,6 +8,11 @@ object NativeTts {
     }
 
     external fun setEngineConfig(provider: String, numThreads: Int): Boolean
+    external fun setProsodyConfig(
+        lengthScale: Float,
+        noiseScale: Float,
+        silenceScale: Float
+    ): Boolean
     external fun init(
         acousticModelPath: String,
         vocoderPath: String,

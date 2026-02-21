@@ -17,9 +17,15 @@ constexpr const char* kTag = "MatchaNativeTts";
 constexpr int32_t kDefaultSampleRate = 24000;
 constexpr int32_t kDefaultThreads = 2;
 constexpr int32_t kMaxThreads = 16;
-constexpr float kLowLatencyLengthScale = 0.85f;
-constexpr float kLowLatencyNoiseScale = 0.667f;
-constexpr float kLowLatencySilenceScale = 0.05f;
+constexpr float kDefaultLengthScale = 1.00f;
+constexpr float kDefaultNoiseScale = 0.64f;
+constexpr float kDefaultSilenceScale = 0.12f;
+constexpr float kMinLengthScale = 0.50f;
+constexpr float kMaxLengthScale = 1.50f;
+constexpr float kMinNoiseScale = 0.10f;
+constexpr float kMaxNoiseScale = 2.00f;
+constexpr float kMinSilenceScale = 0.00f;
+constexpr float kMaxSilenceScale = 0.50f;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kTag, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kTag, __VA_ARGS__)
@@ -32,6 +38,9 @@ int32_t g_num_threads = kDefaultThreads;
 
 std::string g_preferred_provider = "cpu";
 int32_t g_preferred_threads = 4;
+float g_preferred_length_scale = kDefaultLengthScale;
+float g_preferred_noise_scale = kDefaultNoiseScale;
+float g_preferred_silence_scale = kDefaultSilenceScale;
 
 bool Exists(const std::string& path) {
   return access(path.c_str(), F_OK) == 0;
@@ -48,6 +57,10 @@ std::string NormalizeProvider(std::string provider) {
 
 bool IsValidProvider(const std::string& provider) {
   return provider == "cpu" || provider == "xnnpack";
+}
+
+float Clampf(float value, float min_value, float max_value) {
+  return std::max(min_value, std::min(value, max_value));
 }
 
 void DestroyTtsLocked() {
@@ -114,13 +127,13 @@ bool InitCoreLocked(const std::string& acoustic_model_path,
     config.model.matcha.lexicon = lexicon_path.c_str();
   }
   config.model.matcha.data_dir = data_dir.c_str();
-  config.model.matcha.length_scale = kLowLatencyLengthScale;
-  config.model.matcha.noise_scale = kLowLatencyNoiseScale;
+  config.model.matcha.length_scale = g_preferred_length_scale;
+  config.model.matcha.noise_scale = g_preferred_noise_scale;
 
   config.model.num_threads = std::clamp(num_threads, 1, kMaxThreads);
   config.model.debug = 0;
   config.max_num_sentences = 1;
-  config.silence_scale = kLowLatencySilenceScale;
+  config.silence_scale = g_preferred_silence_scale;
 
   DestroyTtsLocked();
 
@@ -141,10 +154,10 @@ bool InitCoreLocked(const std::string& acoustic_model_path,
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start_time)
           .count();
   LOGI(
-      "init(): success, sample_rate=%d, provider=%s, requested_provider=%s, threads=%d, length_scale=%.2f, noise_scale=%.3f, lexicon=%s, took=%lld ms",
+      "init(): success, sample_rate=%d, provider=%s, requested_provider=%s, threads=%d, length_scale=%.2f, noise_scale=%.3f, silence_scale=%.3f, lexicon=%s, took=%lld ms",
       g_sample_rate, g_provider.c_str(), preferred_provider.c_str(),
       g_num_threads, config.model.matcha.length_scale,
-      config.model.matcha.noise_scale,
+      config.model.matcha.noise_scale, config.silence_scale,
       has_lexicon ? "on" : "off",
       static_cast<long long>(ms));
 
@@ -181,6 +194,22 @@ Java_com_example_tts_NativeTts_setEngineConfig(JNIEnv* env, jobject /*thiz*/,
   g_preferred_threads = threads;
   LOGI("setEngineConfig(): provider=%s threads=%d", g_preferred_provider.c_str(),
        g_preferred_threads);
+  return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_tts_NativeTts_setProsodyConfig(JNIEnv* /*env*/, jobject /*thiz*/,
+                                                 jfloat lengthScale,
+                                                 jfloat noiseScale,
+                                                 jfloat silenceScale) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_preferred_length_scale = Clampf(lengthScale, kMinLengthScale, kMaxLengthScale);
+  g_preferred_noise_scale = Clampf(noiseScale, kMinNoiseScale, kMaxNoiseScale);
+  g_preferred_silence_scale = Clampf(silenceScale, kMinSilenceScale, kMaxSilenceScale);
+
+  LOGI("setProsodyConfig(): length_scale=%.2f noise_scale=%.3f silence_scale=%.3f",
+       g_preferred_length_scale, g_preferred_noise_scale,
+       g_preferred_silence_scale);
   return JNI_TRUE;
 }
 

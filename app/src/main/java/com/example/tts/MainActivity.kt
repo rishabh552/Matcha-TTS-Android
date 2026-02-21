@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private data class GeneratedChunk(
@@ -39,10 +40,17 @@ class MainActivity : AppCompatActivity() {
         val longTextThresholdWords: Int
     )
 
+    private data class ProsodyProfile(
+        val lengthScale: Float,
+        val noiseScale: Float,
+        val silenceScale: Float
+    )
+
     private data class RuntimeProfile(
         val tier: String,
         val threads: Int,
         val synthesis: SynthesisProfile,
+        val prosody: ProsodyProfile,
         val useA23ShortUtteranceWorkaround: Boolean
     )
 
@@ -58,7 +66,25 @@ class MainActivity : AppCompatActivity() {
         private const val SHORT_UTTERANCE_MAX_MS = 1800L
         private const val SHORT_UTTERANCE_PREROLL_MS = 320L
         private const val SHORT_UTTERANCE_POSTROLL_MS = 180L
-        private const val VERY_SHORT_SPEED = 0.90f
+        private const val VERY_SHORT_SPEED = 0.96f
+
+        private val LOW_TIER_PROSODY = ProsodyProfile(
+            lengthScale = 0.95f,
+            noiseScale = 0.64f,
+            silenceScale = 0.10f
+        )
+
+        private val MID_TIER_PROSODY = ProsodyProfile(
+            lengthScale = 1.00f,
+            noiseScale = 0.62f,
+            silenceScale = 0.12f
+        )
+
+        private val HIGH_TIER_PROSODY = ProsodyProfile(
+            lengthScale = 1.03f,
+            noiseScale = 0.60f,
+            silenceScale = 0.14f
+        )
 
         private val LOW_TIER_PROFILE = SynthesisProfile(
             name = "low",
@@ -66,9 +92,9 @@ class MainActivity : AppCompatActivity() {
             maxChunkWords = 20,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.10f,
-            normalSpeed = 1.10f,
-            longSpeed = 1.10f,
+            shortSpeed = 1.04f,
+            normalSpeed = 1.02f,
+            longSpeed = 1.05f,
             longTextThresholdWords = 120
         )
 
@@ -78,9 +104,9 @@ class MainActivity : AppCompatActivity() {
             maxChunkWords = 20,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.10f,
-            normalSpeed = 1.10f,
-            longSpeed = 1.10f,
+            shortSpeed = 1.05f,
+            normalSpeed = 1.03f,
+            longSpeed = 1.06f,
             longTextThresholdWords = 140
         )
 
@@ -90,9 +116,9 @@ class MainActivity : AppCompatActivity() {
             maxChunkWords = 20,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.10f,
-            normalSpeed = 1.10f,
-            longSpeed = 1.10f,
+            shortSpeed = 1.07f,
+            normalSpeed = 1.05f,
+            longSpeed = 1.08f,
             longTextThresholdWords = 160
         )
     }
@@ -105,6 +131,7 @@ class MainActivity : AppCompatActivity() {
         tier = "low",
         threads = 2,
         synthesis = LOW_TIER_PROFILE,
+        prosody = LOW_TIER_PROSODY,
         useA23ShortUtteranceWorkaround = false
     )
 
@@ -126,6 +153,16 @@ class MainActivity : AppCompatActivity() {
 
                     runtimeProfile = chooseRuntimeProfile()
                     audioPlayer.setLowLatencyBufferMode(runtimeProfile.useA23ShortUtteranceWorkaround)
+
+                    val prosody = runtimeProfile.prosody
+                    val prosodyOk = NativeTts.setProsodyConfig(
+                        prosody.lengthScale,
+                        prosody.noiseScale,
+                        prosody.silenceScale
+                    )
+                    if (!prosodyOk) {
+                        Log.w(TAG, "Native prosody config failed. Using engine defaults.")
+                    }
 
                     val initStart = SystemClock.elapsedRealtimeNanos()
                     val initOk = initWithCpuFallback(paths, runtimeProfile.threads)
@@ -177,10 +214,14 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val requestStartNs = SystemClock.elapsedRealtimeNanos()
                     val synthesis = runtimeProfile.synthesis
-                    val inputWords = countWords(text)
+                    val normalizedText = normalizeForSpeech(text)
+                    if (normalizedText != text) {
+                        Log.i(TAG, "Input normalized for speech (chars=${text.length}->${normalizedText.length})")
+                    }
+                    val inputWords = countWords(normalizedText)
 
                     val rawChunks = splitForSynthesis(
-                        text = text,
+                        text = normalizedText,
                         maxChunkChars = synthesis.maxChunkChars,
                         maxChunkWords = synthesis.maxChunkWords
                     )
@@ -198,6 +239,9 @@ class MainActivity : AppCompatActivity() {
                     val chunkQueue = Channel<GeneratedChunk>(capacity = synthesis.queueCapacity)
 
                     val totalGenerateMs = AtomicLong(0L)
+                    val totalPlaybackMs = AtomicLong(0L)
+                    val maxGenerateMs = AtomicLong(0L)
+                    val maxPlaybackMs = AtomicLong(0L)
                     val totalSamples = AtomicInteger(0)
                     val playableChunks = AtomicInteger(0)
                     val generatedChunks = AtomicInteger(0)
@@ -216,10 +260,11 @@ class MainActivity : AppCompatActivity() {
                                     binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
                                 }
 
+                                val cleanedChunk = normalizeChunkForSpeech(chunkText)
                                 val preparedChunk = if (runtimeProfile.useA23ShortUtteranceWorkaround) {
-                                    ensureTerminalPunctuation(chunkText.trim())
+                                    ensureTerminalPunctuation(cleanedChunk)
                                 } else {
-                                    chunkText.trim()
+                                    cleanedChunk
                                 }
 
                                 val speed = chooseSpeed(
@@ -236,6 +281,9 @@ class MainActivity : AppCompatActivity() {
                                 val genMs = (SystemClock.elapsedRealtimeNanos() - genStart) / 1_000_000
 
                                 totalGenerateMs.addAndGet(genMs)
+                                if (genMs > maxGenerateMs.get()) {
+                                    maxGenerateMs.set(genMs)
+                                }
                                 generatedChunks.incrementAndGet()
 
                                 Log.i(
@@ -306,6 +354,10 @@ class MainActivity : AppCompatActivity() {
                                     chunkQueue.cancel(CancellationException("Playback failed"))
                                     break
                                 }
+                                totalPlaybackMs.addAndGet(playMs)
+                                if (playMs > maxPlaybackMs.get()) {
+                                    maxPlaybackMs.set(playMs)
+                                }
                                 totalSamples.addAndGet(playbackSamples.size)
                                 playableChunks.incrementAndGet()
 
@@ -336,11 +388,30 @@ class MainActivity : AppCompatActivity() {
 
                     val wallMs = (SystemClock.elapsedRealtimeNanos() - requestStartNs) / 1_000_000
                     val firstMs = firstAudioMs.get()
+                    val generatedCount = generatedChunks.get()
+                    val playedCount = playableChunks.get()
+                    val genAvgMs = if (generatedCount > 0) totalGenerateMs.get() / generatedCount else 0L
+                    val playAvgMs = if (playedCount > 0) totalPlaybackMs.get() / playedCount else 0L
+                    val audioSeconds = if (sampleRate > 0) {
+                        totalSamples.get().toDouble() / sampleRate.toDouble()
+                    } else {
+                        0.0
+                    }
+                    val genRtf = if (audioSeconds > 0.0) {
+                        (totalGenerateMs.get().toDouble() / 1000.0) / audioSeconds
+                    } else {
+                        0.0
+                    }
+
+                    Log.i(
+                        TAG,
+                        "Request summary: chunks=$playedCount/${chunks.size}, first=${if (firstMs >= 0) "${firstMs}ms" else "-"}, wall=${wallMs}ms, gen_total=${totalGenerateMs.get()}ms, gen_avg=${genAvgMs}ms, gen_max=${maxGenerateMs.get()}ms, play_total=${totalPlaybackMs.get()}ms, play_avg=${playAvgMs}ms, play_max=${maxPlaybackMs.get()}ms, samples=${totalSamples.get()}, rtf=${String.format(Locale.US, "%.3f", genRtf)}"
+                    )
 
                     binding.statusText.text = when {
                         wasCancelled.get() -> "Cancelled"
-                        playableChunks.get() > 0 -> "Done (${playableChunks.get()}/${chunks.size} played, first=${if (firstMs >= 0) "${firstMs}ms" else "-"}, wall=${wallMs}ms, gen=${totalGenerateMs.get()}ms)"
-                        generatedChunks.get() > 0 -> "Generated audio but playback failed"
+                        playedCount > 0 -> "Done ($playedCount/${chunks.size} played, first=${if (firstMs >= 0) "${firstMs}ms" else "-"}, wall=${wallMs}ms, gen=${totalGenerateMs.get()}ms, play=${totalPlaybackMs.get()}ms, rtf=${String.format(Locale.US, "%.2f", genRtf)})"
+                        generatedCount > 0 -> "Generated audio but playback failed"
                         else -> "Generation returned empty audio"
                     }
                 } catch (ce: CancellationException) {
@@ -427,6 +498,7 @@ class MainActivity : AppCompatActivity() {
                 tier = "low",
                 threads = 2,
                 synthesis = LOW_TIER_PROFILE,
+                prosody = LOW_TIER_PROSODY,
                 useA23ShortUtteranceWorkaround = isSamsungA23
             )
 
@@ -434,6 +506,7 @@ class MainActivity : AppCompatActivity() {
                 tier = "high",
                 threads = 4,
                 synthesis = HIGH_TIER_PROFILE,
+                prosody = HIGH_TIER_PROSODY,
                 useA23ShortUtteranceWorkaround = isSamsungA23
             )
 
@@ -441,13 +514,14 @@ class MainActivity : AppCompatActivity() {
                 tier = "mid",
                 threads = 4,
                 synthesis = MID_TIER_PROFILE,
+                prosody = MID_TIER_PROSODY,
                 useA23ShortUtteranceWorkaround = isSamsungA23
             )
         }
 
         Log.i(
             TAG,
-            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, model=${Build.MODEL}, memClass=${memClass}MB, cores=$cores -> cpu/${runtimeProfile.threads}, synthesis=${runtimeProfile.synthesis.name}(chars=${runtimeProfile.synthesis.maxChunkChars}, words=${runtimeProfile.synthesis.maxChunkWords}, maxChunks=${runtimeProfile.synthesis.maxTotalChunks}, queue=${runtimeProfile.synthesis.queueCapacity}), a23_workaround=${runtimeProfile.useA23ShortUtteranceWorkaround}"
+            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, model=${Build.MODEL}, memClass=${memClass}MB, cores=$cores -> cpu/${runtimeProfile.threads}, synthesis=${runtimeProfile.synthesis.name}(chars=${runtimeProfile.synthesis.maxChunkChars}, words=${runtimeProfile.synthesis.maxChunkWords}, maxChunks=${runtimeProfile.synthesis.maxTotalChunks}, queue=${runtimeProfile.synthesis.queueCapacity}), prosody=L${runtimeProfile.prosody.lengthScale}/N${runtimeProfile.prosody.noiseScale}/S${runtimeProfile.prosody.silenceScale}, a23_workaround=${runtimeProfile.useA23ShortUtteranceWorkaround}"
         )
 
         return runtimeProfile
@@ -561,6 +635,52 @@ class MainActivity : AppCompatActivity() {
         return chunks
     }
 
+    private fun normalizeForSpeech(text: String): String {
+        return text
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .replace(Regex("https?://\\S+|www\\.\\S+"), " ")
+            .replace(Regex("\\b\\S+@\\S+\\b"), " ")
+            .replace(Regex("(?m)^\\s*[-*•▪◦●◆■]+\\s+"), "")
+            .replace(Regex("(?i)\\be\\.g\\.?\\b"), " for example ")
+            .replace(Regex("(?i)\\bi\\.e\\.?\\b"), " that is ")
+            .replace(Regex("(?i)\\betc\\.?\\b"), " et cetera ")
+            .replace(Regex("(?i)\\bvs\\.?\\b"), " versus ")
+            .replace(Regex("(?i)\\bet\\s+al\\.?\\b"), " and others ")
+            .replace(Regex("(?i)\\bdr\\.?\\b"), " doctor ")
+            .replace(Regex("(?i)\\bmr\\.?\\b"), " mister ")
+            .replace(Regex("(?i)\\bmrs\\.?\\b"), " missus ")
+            .replace(Regex("(?i)\\bms\\.?\\b"), " miss ")
+            .replace(Regex("(?i)\\bprof\\.?\\b"), " professor ")
+            .replace(Regex("[\\n]+"), ". ")
+            .replace(Regex("[\\[\\]{}<>]"), " ")
+            .replace(Regex("(?<=[\\p{L}\\p{N}])-(?=[\\p{L}\\p{N}])"), " ")
+            .replace(Regex("(?<=\\s)-(?=\\s|$)"), ", ")
+            .replace("(", ", ")
+            .replace(")", ", ")
+            .replace(":", ", ")
+            .replace(";", ", ")
+            .replace("—", ", ")
+            .replace("–", ", ")
+            .replace("…", ". ")
+            .replace("/", " ")
+            .replace("\\", " ")
+            .replace("\"", "")
+            .replace("“", "")
+            .replace("”", "")
+            .replace(Regex("[#*_`|]+"), " ")
+            .replace(Regex("(?<=\\s)\\.(?=\\s)"), " ")
+            .replace(Regex("[,;:]{2,}"), ", ")
+            .replace(Regex("[.!?]{2,}"), ". ")
+            .replace(Regex("\\s*([,])\\s*"), ", ")
+            .replace(Regex("\\s*([.!?])\\s*"), "$1 ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+    private fun normalizeChunkForSpeech(text: String): String {
+        val normalized = normalizeForSpeech(text)
+        return if (normalized.isNotEmpty()) normalized else text.trim()
+    }
     private fun ensureTerminalPunctuation(text: String): String {
         if (text.isEmpty()) return text
         if (TERMINAL_PUNCTUATION.contains(text.last())) return text
