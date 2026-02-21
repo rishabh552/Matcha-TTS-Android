@@ -62,6 +62,11 @@ class MainActivity : AppCompatActivity() {
         private val SENTENCE_SPLIT_REGEX = Regex("(?<=[.!?;:])\\s+")
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val TERMINAL_PUNCTUATION = setOf('.', '!', '?', ';', ':')
+        private val CLAUSE_TERMINATORS = setOf(',', ';', ':')
+        private val CLAUSE_BREAK_WORDS = setOf(
+            "and", "but", "or", "because", "so", "while", "though", "although",
+            "however", "therefore", "meanwhile", "which", "that", "then"
+        )
 
         private const val SHORT_UTTERANCE_MAX_MS = 1800L
         private const val SHORT_UTTERANCE_PREROLL_MS = 320L
@@ -69,56 +74,56 @@ class MainActivity : AppCompatActivity() {
         private const val VERY_SHORT_SPEED = 0.96f
 
         private val LOW_TIER_PROSODY = ProsodyProfile(
-            lengthScale = 0.95f,
-            noiseScale = 0.64f,
-            silenceScale = 0.10f
+            lengthScale = 0.99f,
+            noiseScale = 0.66f,
+            silenceScale = 0.14f
         )
 
         private val MID_TIER_PROSODY = ProsodyProfile(
             lengthScale = 1.00f,
-            noiseScale = 0.62f,
-            silenceScale = 0.12f
+            noiseScale = 0.64f,
+            silenceScale = 0.15f
         )
 
         private val HIGH_TIER_PROSODY = ProsodyProfile(
-            lengthScale = 1.03f,
-            noiseScale = 0.60f,
-            silenceScale = 0.14f
+            lengthScale = 1.01f,
+            noiseScale = 0.62f,
+            silenceScale = 0.16f
         )
 
         private val LOW_TIER_PROFILE = SynthesisProfile(
             name = "low",
-            maxChunkChars = 120,
-            maxChunkWords = 20,
+            maxChunkChars = 140,
+            maxChunkWords = 24,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.04f,
-            normalSpeed = 1.02f,
-            longSpeed = 1.05f,
+            shortSpeed = 1.00f,
+            normalSpeed = 0.98f,
+            longSpeed = 0.98f,
             longTextThresholdWords = 120
         )
 
         private val MID_TIER_PROFILE = SynthesisProfile(
             name = "mid",
-            maxChunkChars = 120,
-            maxChunkWords = 20,
+            maxChunkChars = 170,
+            maxChunkWords = 28,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.05f,
-            normalSpeed = 1.03f,
-            longSpeed = 1.06f,
+            shortSpeed = 1.01f,
+            normalSpeed = 0.99f,
+            longSpeed = 0.99f,
             longTextThresholdWords = 140
         )
 
         private val HIGH_TIER_PROFILE = SynthesisProfile(
             name = "high",
-            maxChunkChars = 120,
-            maxChunkWords = 20,
+            maxChunkChars = 190,
+            maxChunkWords = 32,
             maxTotalChunks = 80,
             queueCapacity = 2,
-            shortSpeed = 1.07f,
-            normalSpeed = 1.05f,
-            longSpeed = 1.08f,
+            shortSpeed = 1.02f,
+            normalSpeed = 1.00f,
+            longSpeed = 1.00f,
             longTextThresholdWords = 160
         )
     }
@@ -260,11 +265,10 @@ class MainActivity : AppCompatActivity() {
                                     binding.statusText.text = "Generating ${index + 1}/${chunks.size}..."
                                 }
 
-                                val cleanedChunk = normalizeChunkForSpeech(chunkText)
                                 val preparedChunk = if (runtimeProfile.useA23ShortUtteranceWorkaround) {
-                                    ensureTerminalPunctuation(cleanedChunk)
+                                    ensureTerminalPunctuation(chunkText.trim())
                                 } else {
-                                    cleanedChunk
+                                    chunkText.trim()
                                 }
 
                                 val speed = chooseSpeed(
@@ -612,13 +616,22 @@ class MainActivity : AppCompatActivity() {
         val chunks = mutableListOf<String>()
         val current = StringBuilder()
         var currentWords = 0
+        val softBreakWordThreshold = maxOf(6, (maxChunkWords * 3) / 4)
+        val punctuationBreakThreshold = maxOf(5, maxChunkWords / 2)
+
+        fun flushCurrent() {
+            if (current.isNotEmpty()) {
+                chunks += current.toString().trim()
+                current.clear()
+                currentWords = 0
+            }
+        }
 
         for (word in words) {
             val nextLen = if (current.isEmpty()) word.length else current.length + 1 + word.length
-            if ((nextLen > maxChunkChars || currentWords >= maxChunkWords) && current.isNotEmpty()) {
-                chunks += current.toString()
-                current.clear()
-                currentWords = 0
+            val hardLimitReached = nextLen > maxChunkChars || currentWords >= maxChunkWords
+            if (hardLimitReached && current.isNotEmpty()) {
+                flushCurrent()
             }
 
             if (current.isNotEmpty()) {
@@ -626,21 +639,46 @@ class MainActivity : AppCompatActivity() {
             }
             current.append(word)
             currentWords += 1
+
+            val token = word.trim { !it.isLetterOrDigit() }.lowercase()
+            val hasClausePunctuation = word.lastOrNull() in CLAUSE_TERMINATORS
+            val shouldSoftBreakOnWord = currentWords >= softBreakWordThreshold && token in CLAUSE_BREAK_WORDS
+            val shouldSoftBreakOnPunctuation = hasClausePunctuation && currentWords >= punctuationBreakThreshold
+
+            if (shouldSoftBreakOnWord || shouldSoftBreakOnPunctuation) {
+                flushCurrent()
+            }
         }
 
-        if (current.isNotEmpty()) {
-            chunks += current.toString()
-        }
-
+        flushCurrent()
         return chunks
     }
 
     private fun normalizeForSpeech(text: String): String {
-        return text
+        if (text.isBlank()) {
+            return text
+        }
+
+        var normalized = text
             .replace("\r\n", "\n")
             .replace('\r', '\n')
-            .replace(Regex("https?://\\S+|www\\.\\S+"), " ")
-            .replace(Regex("\\b\\S+@\\S+\\b"), " ")
+
+        val protectedTokens = LinkedHashMap<String, String>()
+
+        fun protect(pattern: Regex, label: String) {
+            normalized = pattern.replace(normalized) { match ->
+                val token = "PROTECTED${label}${protectedTokens.size}TOKEN"
+                protectedTokens[token] = match.value
+                token
+            }
+        }
+
+        protect(Regex("https?://\\S+|www\\.\\S+"), "URL")
+        protect(Regex("\\b[\\w.+%-]+@[\\w.-]+\\.[A-Za-z]{2,}\\b"), "MAIL")
+        protect(Regex("\\bv?\\d+(?:\\.\\d+){1,3}\\b"), "VER")
+        protect(Regex("\\b\\d+\\.\\d+\\b"), "DEC")
+
+        normalized = normalized
             .replace(Regex("(?m)^\\s*[-*•▪◦●◆■]+\\s+"), "")
             .replace(Regex("(?i)\\be\\.g\\.?\\b"), " for example ")
             .replace(Regex("(?i)\\bi\\.e\\.?\\b"), " that is ")
@@ -652,9 +690,11 @@ class MainActivity : AppCompatActivity() {
             .replace(Regex("(?i)\\bmrs\\.?\\b"), " missus ")
             .replace(Regex("(?i)\\bms\\.?\\b"), " miss ")
             .replace(Regex("(?i)\\bprof\\.?\\b"), " professor ")
+            .replace(Regex("(?i)\\bapprox\\.?\\b"), " approximately ")
             .replace(Regex("[\\n]+"), ". ")
             .replace(Regex("[\\[\\]{}<>]"), " ")
             .replace(Regex("(?<=[\\p{L}\\p{N}])-(?=[\\p{L}\\p{N}])"), " ")
+            .replace(Regex("(?<=[\\p{L}\\p{N}])/(?=[\\p{L}\\p{N}])"), " or ")
             .replace(Regex("(?<=\\s)-(?=\\s|$)"), ", ")
             .replace("(", ", ")
             .replace(")", ", ")
@@ -663,12 +703,11 @@ class MainActivity : AppCompatActivity() {
             .replace("—", ", ")
             .replace("–", ", ")
             .replace("…", ". ")
-            .replace("/", " ")
             .replace("\\", " ")
             .replace("\"", "")
             .replace("“", "")
             .replace("”", "")
-            .replace(Regex("[#*_`|]+"), " ")
+            .replace(Regex("[#*_`|~]+"), " ")
             .replace(Regex("(?<=\\s)\\.(?=\\s)"), " ")
             .replace(Regex("[,;:]{2,}"), ", ")
             .replace(Regex("[.!?]{2,}"), ". ")
@@ -676,11 +715,16 @@ class MainActivity : AppCompatActivity() {
             .replace(Regex("\\s*([.!?])\\s*"), "$1 ")
             .replace(Regex("\\s+"), " ")
             .trim()
+
+        if (protectedTokens.isNotEmpty()) {
+            for ((token, value) in protectedTokens) {
+                normalized = normalized.replace(token, value)
+            }
+        }
+
+        return normalized
     }
-    private fun normalizeChunkForSpeech(text: String): String {
-        val normalized = normalizeForSpeech(text)
-        return if (normalized.isNotEmpty()) normalized else text.trim()
-    }
+
     private fun ensureTerminalPunctuation(text: String): String {
         if (text.isEmpty()) return text
         if (TERMINAL_PUNCTUATION.contains(text.last())) return text

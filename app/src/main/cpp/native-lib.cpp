@@ -18,8 +18,8 @@ constexpr int32_t kDefaultSampleRate = 24000;
 constexpr int32_t kDefaultThreads = 2;
 constexpr int32_t kMaxThreads = 16;
 constexpr float kDefaultLengthScale = 1.00f;
-constexpr float kDefaultNoiseScale = 0.64f;
-constexpr float kDefaultSilenceScale = 0.12f;
+constexpr float kDefaultNoiseScale = 0.63f;
+constexpr float kDefaultSilenceScale = 0.14f;
 constexpr float kMinLengthScale = 0.50f;
 constexpr float kMaxLengthScale = 1.50f;
 constexpr float kMinNoiseScale = 0.10f;
@@ -132,7 +132,7 @@ bool InitCoreLocked(const std::string& acoustic_model_path,
 
   config.model.num_threads = std::clamp(num_threads, 1, kMaxThreads);
   config.model.debug = 0;
-  config.max_num_sentences = 1;
+  config.max_num_sentences = 3;
   config.silence_scale = g_preferred_silence_scale;
 
   DestroyTtsLocked();
