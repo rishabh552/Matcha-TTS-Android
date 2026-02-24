@@ -65,7 +65,7 @@ class MainActivity : AppCompatActivity() {
         private val CLAUSE_TERMINATORS = setOf(',', ';', ':')
         private val CLAUSE_BREAK_WORDS = setOf(
             "and", "but", "or", "because", "so", "while", "though", "although",
-            "however", "therefore", "meanwhile", "which", "that", "then"
+            "however", "therefore", "meanwhile"
         )
 
         private const val SHORT_UTTERANCE_MAX_MS = 1800L
@@ -74,9 +74,9 @@ class MainActivity : AppCompatActivity() {
         private const val VERY_SHORT_SPEED = 0.96f
 
         private val LOW_TIER_PROSODY = ProsodyProfile(
-            lengthScale = 0.99f,
-            noiseScale = 0.66f,
-            silenceScale = 0.14f
+            lengthScale = 1.03f,
+            noiseScale = 0.58f,
+            silenceScale = 0.17f
         )
 
         private val MID_TIER_PROSODY = ProsodyProfile(
@@ -89,6 +89,12 @@ class MainActivity : AppCompatActivity() {
             lengthScale = 1.01f,
             noiseScale = 0.62f,
             silenceScale = 0.16f
+        )
+
+        private val A23_PROSODY = ProsodyProfile(
+            lengthScale = 1.02f,
+            noiseScale = 0.56f,
+            silenceScale = 0.18f
         )
 
         private val LOW_TIER_PROFILE = SynthesisProfile(
@@ -523,12 +529,19 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+
+        val tunedProfile = if (isSamsungA23) {
+            runtimeProfile.copy(prosody = A23_PROSODY)
+        } else {
+            runtimeProfile
+        }
+
         Log.i(
             TAG,
-            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, model=${Build.MODEL}, memClass=${memClass}MB, cores=$cores -> cpu/${runtimeProfile.threads}, synthesis=${runtimeProfile.synthesis.name}(chars=${runtimeProfile.synthesis.maxChunkChars}, words=${runtimeProfile.synthesis.maxChunkWords}, maxChunks=${runtimeProfile.synthesis.maxTotalChunks}, queue=${runtimeProfile.synthesis.queueCapacity}), prosody=L${runtimeProfile.prosody.lengthScale}/N${runtimeProfile.prosody.noiseScale}/S${runtimeProfile.prosody.silenceScale}, a23_workaround=${runtimeProfile.useA23ShortUtteranceWorkaround}"
+            "Device profile: hardware=${Build.HARDWARE}, board=${Build.BOARD}, model=${Build.MODEL}, memClass=${memClass}MB, cores=$cores -> cpu/${tunedProfile.threads}, synthesis=${tunedProfile.synthesis.name}(chars=${tunedProfile.synthesis.maxChunkChars}, words=${tunedProfile.synthesis.maxChunkWords}, maxChunks=${tunedProfile.synthesis.maxTotalChunks}, queue=${tunedProfile.synthesis.queueCapacity}), prosody=L${tunedProfile.prosody.lengthScale}/N${tunedProfile.prosody.noiseScale}/S${tunedProfile.prosody.silenceScale}, a23_workaround=${tunedProfile.useA23ShortUtteranceWorkaround}"
         )
 
-        return runtimeProfile
+        return tunedProfile
     }
 
     private fun chooseSpeed(
@@ -616,8 +629,8 @@ class MainActivity : AppCompatActivity() {
         val chunks = mutableListOf<String>()
         val current = StringBuilder()
         var currentWords = 0
-        val softBreakWordThreshold = maxOf(6, (maxChunkWords * 3) / 4)
-        val punctuationBreakThreshold = maxOf(5, maxChunkWords / 2)
+        val softBreakWordThreshold = maxOf(8, (maxChunkWords * 9) / 10)
+        val punctuationBreakThreshold = maxOf(7, (maxChunkWords * 3) / 4)
 
         fun flushCurrent() {
             if (current.isNotEmpty()) {
