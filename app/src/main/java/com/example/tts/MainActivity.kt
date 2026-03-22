@@ -225,7 +225,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val requestStartNs = SystemClock.elapsedRealtimeNanos()
                     val synthesis = runtimeProfile.synthesis
-                    val normalizedText = normalizeForSpeech(text)
+                    val normalizedText = prepareTextForSpeech(text)
                     if (normalizedText != text) {
                         Log.i(TAG, "Input normalized for speech (chars=${text.length}->${normalizedText.length})")
                     }
@@ -667,6 +667,31 @@ class MainActivity : AppCompatActivity() {
         return chunks
     }
 
+    private fun prepareTextForSpeech(text: String): String {
+        if (text.isBlank()) {
+            return text
+        }
+
+        val prep = IndicPhoneticPreprocessor.preprocess(text)
+        if (prep.transformedTokenCount > 0) {
+            val preview = prep.tokens
+                .asSequence()
+                .filter { it.raw != it.transformed }
+                .take(6)
+                .joinToString(" | ") { "${it.raw}->${it.transformed}" }
+            Log.i(
+                TAG,
+                "Phonetic preprocess: dominant=${prep.dominantScript}, transformed_tokens=${prep.transformedTokenCount}, chars=${text.length}->${prep.output.length}, preview=$preview"
+            )
+        }
+
+        return if (prep.transformedTokenCount == 0 && prep.dominantScript == ScriptClass.LATIN) {
+            normalizeForSpeech(prep.output)
+        } else {
+            normalizeIndicForSpeech(prep.output)
+        }
+    }
+
     private fun normalizeForSpeech(text: String): String {
         if (text.isBlank()) {
             return text
@@ -736,6 +761,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         return normalized
+    }
+
+    private fun normalizeIndicForSpeech(text: String): String {
+        if (text.isBlank()) {
+            return text
+        }
+
+        return text
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .replace('।', '.')
+            .replace("॥", ".")
+            .replace(Regex("[\\n]+"), ". ")
+            .replace(Regex("[…]+"), ". ")
+            .replace(Regex("[,;:]{2,}"), ", ")
+            .replace(Regex("[.!?]{2,}"), ". ")
+            .replace(Regex("\\s*([,;:])\\s*"), ", ")
+            .replace(Regex("\\s*([.!?])\\s*"), "$1 ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun ensureTerminalPunctuation(text: String): String {
