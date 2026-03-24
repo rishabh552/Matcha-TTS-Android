@@ -1,0 +1,183 @@
+diff --git a/sherpa-onnx/c-api/c-api.cc b/sherpa-onnx/c-api/c-api.cc
+index 0b1ddf0..295890d 100644
+--- a/sherpa-onnx/c-api/c-api.cc
++++ b/sherpa-onnx/c-api/c-api.cc
+@@ -7,6 +7,7 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <memory>
++#include <mutex>
+ #include <sstream>
+ #include <string>
+ #include <utility>
+@@ -41,7 +42,9 @@
+ #include "sherpa-onnx/csrc/wave-writer.h"
+ 
+ #if SHERPA_ONNX_ENABLE_TTS == 1
++#include "phonemize.hpp"  // NOLINT
+ #include "sherpa-onnx/csrc/offline-tts.h"
++#include "sherpa-onnx/csrc/offline-tts-frontend.h"
+ #endif
+ 
+ #if SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION == 1
+@@ -1381,6 +1384,42 @@ struct SherpaOnnxOfflineTts {
+   std::unique_ptr<sherpa_onnx::OfflineTts> impl;
+ };
+ 
++static void AppendUtf8(char32_t cp, std::string *out) {
++  if (!out) {
++    return;
++  }
++
++  if (cp <= 0x7F) {
++    out->push_back(static_cast<char>(cp));
++  } else if (cp <= 0x7FF) {
++    out->push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
++    out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
++  } else if (cp <= 0xFFFF) {
++    out->push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
++    out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
++    out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
++  } else if (cp <= 0x10FFFF) {
++    out->push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
++    out->push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
++    out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
++    out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
++  }
++}
++
++static std::string PhonemesToUtf8(
++    const std::vector<std::vector<piper::Phoneme>> &phonemes) {
++  std::string out;
++  for (size_t i = 0; i < phonemes.size(); ++i) {
++    if (i > 0) {
++      out.push_back(' ');
++    }
++    for (auto p : phonemes[i]) {
++      AppendUtf8(p, &out);
++    }
++  }
++  return out;
++}
++
+ static sherpa_onnx::OfflineTtsConfig GetOfflineTtsConfig(
+     const SherpaOnnxOfflineTtsConfig *config) {
+   sherpa_onnx::OfflineTtsConfig tts_config;
+@@ -1836,6 +1875,55 @@ const SherpaOnnxGeneratedAudio *SherpaOnnxOfflineTtsGenerateWithConfig(
+   }
+ }
+ 
++const char *SherpaOnnxOfflineTtsPhonemizeWithEspeak(const char *text,
++                                                    const char *voice,
++                                                    const char *data_dir) {
++  if (!text) {
++    SHERPA_ONNX_LOGE("text is nullptr");
++    return nullptr;
++  }
++
++  if (!data_dir || !std::strlen(data_dir)) {
++    SHERPA_ONNX_LOGE("data_dir is nullptr or empty");
++    return nullptr;
++  }
++
++  try {
++    sherpa_onnx::InitEspeak(data_dir);
++
++    piper::eSpeakPhonemeConfig config;
++    if (voice && std::strlen(voice) > 0) {
++      config.voice = voice;
++    }
++
++    std::vector<std::vector<piper::Phoneme>> phonemes;
++    static std::mutex phonemize_mutex;
++    {
++      std::lock_guard<std::mutex> lock(phonemize_mutex);
++      piper::phonemize_eSpeak(text, config, phonemes);
++    }
++
++    std::string out = PhonemesToUtf8(phonemes);
++    char *ans = new char[out.size() + 1];
++    std::copy(out.begin(), out.end(), ans);
++    ans[out.size()] = '\0';
++    return ans;
++  } catch (const std::exception &e) {
++    SHERPA_ONNX_LOGE("Phonemize failed: %s", e.what());
++    return nullptr;
++  } catch (...) {
++    SHERPA_ONNX_LOGE("Phonemize failed with unknown error");
++    return nullptr;
++  }
++}
++
++void SherpaOnnxOfflineTtsFreePhonemes(const char *text) {
++  if (!text) {
++    return;
++  }
++  delete[] text;
++}
++
+ void SherpaOnnxDestroyOfflineTtsGeneratedAudio(
+     const SherpaOnnxGeneratedAudio *p) {
+   if (p) {
+@@ -1917,6 +2005,17 @@ const SherpaOnnxGeneratedAudio *SherpaOnnxOfflineTtsGenerateWithConfig(
+   return nullptr;
+ }
+ 
++const char *SherpaOnnxOfflineTtsPhonemizeWithEspeak(const char *text,
++                                                    const char *voice,
++                                                    const char *data_dir) {
++  SHERPA_ONNX_LOGE("TTS is not enabled. Please rebuild sherpa-onnx");
++  return nullptr;
++}
++
++void SherpaOnnxOfflineTtsFreePhonemes(const char *text) {
++  SHERPA_ONNX_LOGE("TTS is not enabled. Please rebuild sherpa-onnx");
++}
++
+ void SherpaOnnxDestroyOfflineTtsGeneratedAudio(
+     const SherpaOnnxGeneratedAudio *p) {
+   SHERPA_ONNX_LOGE("TTS is not enabled. Please rebuild sherpa-onnx");
+diff --git a/sherpa-onnx/c-api/c-api.h b/sherpa-onnx/c-api/c-api.h
+index 587b26a..c667a94 100644
+--- a/sherpa-onnx/c-api/c-api.h
++++ b/sherpa-onnx/c-api/c-api.h
+@@ -2687,6 +2687,24 @@ SherpaOnnxOfflineTtsGenerateWithConfig(
+     const SherpaOnnxGenerationConfig *config,
+     SherpaOnnxGeneratedAudioProgressCallbackWithArg callback, void *arg);
+ 
++/**
++ * @brief Convert UTF-8 text to espeak phonemes (IPA-like symbols).
++ *
++ * @param text Input UTF-8 text.
++ * @param voice Optional espeak voice (for example: "en-us", "hi", "ta", "te").
++ *              Pass NULL or empty to use the default voice.
++ * @param data_dir Directory that contains espeak-ng-data.
++ * @return A heap-allocated UTF-8 string on success; NULL on failure.
++ *         Free it with SherpaOnnxOfflineTtsFreePhonemes().
++ */
++SHERPA_ONNX_API const char *SherpaOnnxOfflineTtsPhonemizeWithEspeak(
++    const char *text, const char *voice, const char *data_dir);
++
++/**
++ * @brief Free a string returned by SherpaOnnxOfflineTtsPhonemizeWithEspeak().
++ */
++SHERPA_ONNX_API void SherpaOnnxOfflineTtsFreePhonemes(const char *text);
++
+ /**
+  * @brief Destroy audio returned by a TTS generation API.
+  *
+diff --git a/sherpa-onnx/c-api/sherpa-onnx-symbols-c.exp b/sherpa-onnx/c-api/sherpa-onnx-symbols-c.exp
+index 0f8f7cf..bfda16c 100644
+--- a/sherpa-onnx/c-api/sherpa-onnx-symbols-c.exp
++++ b/sherpa-onnx/c-api/sherpa-onnx-symbols-c.exp
+@@ -107,8 +107,10 @@ _SherpaOnnxOfflineTtsGenerate
+ _SherpaOnnxOfflineTtsGenerateWithCallback
+ _SherpaOnnxOfflineTtsGenerateWithCallbackWithArg
+ _SherpaOnnxOfflineTtsGenerateWithConfig
++_SherpaOnnxOfflineTtsFreePhonemes
+ _SherpaOnnxOfflineTtsGenerateWithProgressCallback
+ _SherpaOnnxOfflineTtsGenerateWithProgressCallbackWithArg
++_SherpaOnnxOfflineTtsPhonemizeWithEspeak
+ _SherpaOnnxOfflineTtsGenerateWithZipvoice
+ _SherpaOnnxOfflineTtsNumSpeakers
+ _SherpaOnnxOfflineTtsSampleRate
