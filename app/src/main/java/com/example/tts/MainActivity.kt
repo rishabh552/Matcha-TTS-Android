@@ -126,35 +126,30 @@ class MainActivity : AppCompatActivity() {
         private const val PREF_GOOGLE_TA_RATE = "google_ta_rate"
         private const val PREF_GOOGLE_TA_PITCH = "google_ta_pitch"
 
-        private val LOW_TIER_PROSODY = ProsodyProfile(
-            lengthScale = 1.03f,
-            noiseScale = 0.58f,
-            silenceScale = 0.17f
-        )
-
-        private val MID_TIER_PROSODY = ProsodyProfile(
+        // Human-like baseline: keep Matcha near neutral speech rate, with moderate
+        // stochasticity and sentence pause duration.
+        private val HUMANLIKE_BASE_PROSODY = ProsodyProfile(
             lengthScale = 1.00f,
-            noiseScale = 0.64f,
-            silenceScale = 0.15f
+            noiseScale = 0.67f,
+            silenceScale = 0.20f
         )
 
-        private val HIGH_TIER_PROSODY = ProsodyProfile(
-            lengthScale = 1.01f,
-            noiseScale = 0.62f,
-            silenceScale = 0.16f
+        private val LOW_TIER_PROSODY = HUMANLIKE_BASE_PROSODY.copy(
+            noiseScale = 0.62f
         )
 
-        private val A23_PROSODY = ProsodyProfile(
-            lengthScale = 1.02f,
-            noiseScale = 0.56f,
-            silenceScale = 0.18f
+        private val MID_TIER_PROSODY = HUMANLIKE_BASE_PROSODY.copy(
+            noiseScale = 0.64f
         )
 
-        private val NOTHING_2A_PAD5_PROSODY = ProsodyProfile(
-            lengthScale = 1.03f,
-            noiseScale = 0.58f,
-            silenceScale = 0.17f
+        private val HIGH_TIER_PROSODY = HUMANLIKE_BASE_PROSODY
+
+        private val A23_PROSODY = HUMANLIKE_BASE_PROSODY.copy(
+            noiseScale = 0.60f,
+            silenceScale = 0.21f
         )
+
+        private val NOTHING_2A_PAD5_PROSODY = HUMANLIKE_BASE_PROSODY
 
         private val LOW_TIER_PROFILE = SynthesisProfile(
             name = "low",
