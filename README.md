@@ -1,22 +1,36 @@
 # Matcha Android TTS (Kotlin + JNI + Sherpa-ONNX C++)
 
-Android text-to-speech demo app using the Matcha acoustic model and a vocoder via Sherpa-ONNX C API. The Kotlin UI calls into a JNI layer that loads ONNX models from app assets and streams PCM audio through `AudioTrack`.
+Android TTS demo app with hybrid routing:
+- English: on-device Matcha (Sherpa-ONNX C API via JNI)
+- Hindi/Tamil: Android TTS (prefers Google TTS voices)
+
+Audio playback uses `AudioTrack` float PCM for Matcha output, while Hindi/Tamil routes use Android `TextToSpeech`.
 
 ## Features
 
-- Matcha TTS inference on-device (CPU).
+- On-device Matcha inference on CPU (offline for English).
 - JNI bridge to Sherpa-ONNX C API.
-- Asset-based model packaging for offline use.
-- Simple playback pipeline using float PCM.
+- Language-aware routing:
+  - Tamil script dominant -> Google Tamil route
+  - Devanagari present -> Google Hindi route
+  - Otherwise -> Matcha English route
+- Device-aware runtime tuning (Nothing Phone 2a, Xiaomi Pad 5, Samsung A23, generic tiers).
+- Settings UI for:
+  - Matcha English prosody (`length/noise/silence`)
+  - Matcha English synthesis speeds (`short/normal/long`)
+  - Google Hindi speech rate/pitch
+  - Google Tamil speech rate/pitch
+- Short-utterance guard path for devices prone to clipping very short outputs.
 
 ## Requirements
 
 - Android Studio (Koala or newer recommended).
 - Android SDK with NDK/CMake support.
-- Device or emulator with `arm64-v8a` (native libs are provided for arm64 only).
-- Git Bash or WSL to run the provided shell scripts on Windows.
+- `arm64-v8a` device/emulator (native libs provided for arm64 only).
+- Git Bash or WSL for provided shell scripts on Windows.
+- For Hindi/Tamil routes: Android TTS engine with Hindi/Tamil voices installed (Google TTS preferred).
 
-## Quick start
+## Quick Start
 
 1. Prepare native libraries and headers:
 
@@ -37,7 +51,7 @@ Option A: download automatically
 ./scripts/download_matcha_model.sh
 ```
 
-You can pass a package URL or local archive:
+You can also pass a package URL or local archive:
 
 ```bash
 ./scripts/download_matcha_model.sh matcha-icefall-en_US-ljspeech.tar.bz2
@@ -45,9 +59,9 @@ You can pass a package URL or local archive:
 ./scripts/download_matcha_model.sh /absolute/path/to/matcha-model.tar.bz2
 ```
 
-`download_kokoro_model.sh` is a compatibility wrapper to the Matcha downloader.
+`download_kokoro_model.sh` remains as a compatibility wrapper.
 
-Note: `matcha-icefall-en_US-ljspeech` does not include a vocoder in the archive. The script downloads `vocos-22khz-univ.onnx` from Sherpa-ONNX releases and installs it as `vocoder.onnx`.
+Note: `matcha-icefall-en_US-ljspeech` does not include a vocoder in the archive. The script downloads `vocos-22khz-univ.onnx` and installs it as `vocoder.onnx`.
 
 Option B: copy manually into `app/src/main/assets/matcha/`.
 
@@ -58,90 +72,124 @@ Required files:
 - `espeak-ng-data/`
 
 Optional:
-- `lexicon.txt` (if present, native uses it; otherwise it runs without lexicon)
+- `lexicon.txt` (if missing, engine runs without lexicon)
 
 3. Open and run
 
 Open the project in Android Studio, sync Gradle, and run on an `arm64-v8a` device.
 
-On first launch, the app copies `assets/matcha` to `filesDir/matcha`, initializes native Matcha TTS, and plays audio using `AudioTrack`.
+On first launch, app assets are copied to `filesDir/matcha`, Matcha native is initialized/warmed up, and the app is ready to synthesize.
 
-## Building the debug APK
+## Runtime Behavior
 
-### Prerequisites
+- Provider: CPU (`provider=cpu`).
+- Threading: device/tier tuned with fallback candidates.
+- English route:
+  - Matcha synthesis with chunking and queue-based generation/playback.
+  - Per-device synthesis profile (chunk sizes, queue depth, speed profile).
+- Hindi/Tamil routes:
+  - Uses Android `TextToSpeech` (tries `com.google.android.tts`, then fallback engine).
+  - Preferred voices:
+    - `hi-in-x-hic-lstm-embedded`
+    - `ta-in-x-tac-lstm-embedded`
 
-Before building, ensure you have completed steps 1 and 2 from "Quick start" above:
-- Native libraries installed via `./scripts/setup_sherpa_kokoro.sh 1.12.33`
-- Model assets installed in `app/src/main/assets/matcha/`
+Important routing note:
+- Routing is request-level, not segment-level. A single input is sent to one route based on script counts.
+- Mixed-language text in one input is therefore not optimal yet; it does not split by sentence/segment automatically.
 
-### Option A: Build from Android Studio
+## Defaults (Current)
 
-1. Open the project in Android Studio
-2. Wait for Gradle sync to complete
-3. Click **Build** → **Build Bundle(s) / APK(s)** → **Build APK(s)**
-4. Once complete, click **locate** in the notification or find the APK at:
-   ```
-   app/build/outputs/apk/debug/app-debug.apk
-   ```
+Matcha English prosody baseline:
+- Human-like base: `length=1.00`, `noise=0.67`, `silence=0.20`
+- Used directly for Nothing Phone 2a and Xiaomi Pad 5 profiles.
 
-### Option B: Build from command line
+Other tier prosody defaults:
+- Low tier: `1.00 / 0.62 / 0.20`
+- Mid tier: `1.00 / 0.64 / 0.20`
+- A23 override: `1.00 / 0.60 / 0.21`
 
-**On Windows (PowerShell or Command Prompt):**
+Matcha synthesis speed defaults:
+- Low: `short=1.00`, `normal=0.98`, `long=0.98`
+- Mid: `short=1.01`, `normal=0.99`, `long=0.99`
+- High/Nothing2a: `short=1.02`, `normal=1.00`, `long=1.00`
+
+Google Hindi/Tamil defaults:
+- `rate=1.00`, `pitch=1.00`
+
+## Settings UI
+
+Use top-right menu -> **Settings**.
+
+Configurable ranges:
+- Matcha `length`: `0.50 .. 1.50`
+- Matcha `noise`: `0.10 .. 2.00`
+- Matcha `silence`: `0.00 .. 0.50`
+- Matcha `short/normal/long speed`: `0.70 .. 1.30`
+- Google Hindi/Tamil `rate/pitch`: `0.50 .. 1.50`
+
+Behavior:
+- Matcha prosody changes require native re-init + warmup.
+- Matcha synthesis speed and Google Hindi/Tamil controls update immediately.
+- Settings persist in `SharedPreferences`.
+- **Defaults** button restores device defaults + Google defaults.
+
+## Build and Install
+
+### Build from Android Studio
+
+1. Open project
+2. Wait for Gradle sync
+3. Build -> Build APK(s)
+4. Output: `app/build/outputs/apk/debug/app-debug.apk`
+
+### Build from command line
+
+Windows:
 ```powershell
 .\gradlew assembleDebug
 ```
 
-**On macOS/Linux or Git Bash:**
+macOS/Linux/Git Bash:
 ```bash
 ./gradlew assembleDebug
 ```
 
-The APK will be generated at `app/build/outputs/apk/debug/app-debug.apk`
+### Install via ADB
 
-### Installing the debug APK
-
-**Via Android Studio:**
-- Connect your device via USB with USB debugging enabled
-- Click **Run** → **Run 'app'** or press `Shift+F10`
-
-**Via command line:**
 ```bash
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**Manual installation:**
-- Transfer `app-debug.apk` to your device
-- Open the APK file on your device and allow installation from unknown sources if prompted
+If install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, uninstall old app first:
 
-### Common build issues
-
-- **"NDK not configured"**: Install NDK and CMake via Android Studio → Settings → Appearance & Behavior → System Settings → Android SDK → SDK Tools
-- **"Gradle sync failed"**: Ensure you have a stable internet connection for dependency downloads
-- **"Task :app:externalNativeBuildDebug FAILED"**: Verify native libraries exist in `app/src/main/jniLibs/arm64-v8a/`
-- **Build succeeds but app crashes**: Confirm model files are present in `app/src/main/assets/matcha/` before building
-
-## Project structure
-
-- `app/src/main/java/` Kotlin UI and JNI bindings.
-- `app/src/main/cpp/` C++ JNI and Sherpa-ONNX integration.
-- `app/src/main/assets/` model assets (Matcha or Kokoro as provided).
-- `app/src/main/jniLibs/arm64-v8a/` native shared libraries.
-- `scripts/` download and setup helpers.
-
-## Runtime behavior
-
-- Model family: Matcha only.
-- Provider: CPU-first (Kotlin requests `cpu`).
-- Threads: device-aware CPU thread choice (`2` on low-end class, else `4`), fallback to `1`.
-- Generation: uncached per request.
+```bash
+adb uninstall com.example.tts
+adb install app/build/outputs/apk/debug/app-debug.apk
+```
 
 ## Troubleshooting
 
-- Missing `arm64-v8a` libs: re-run `./scripts/setup_sherpa_kokoro.sh` and confirm `jniLibs/arm64-v8a` exists.
-- App crashes on startup: verify `app/src/main/assets/matcha/` contains the required files.
-- No audio output: check device volume, and confirm playback permissions and sample rate support.
+- Missing `arm64-v8a` libs:
+  - Re-run `./scripts/setup_sherpa_kokoro.sh 1.12.33`
+  - Verify `app/src/main/jniLibs/arm64-v8a/` exists
+- App crashes at startup:
+  - Verify required files in `app/src/main/assets/matcha/`
+- Hindi/Tamil says voice unavailable:
+  - Open Google TTS settings and install Hindi/Tamil voice data
+  - Keep Google TTS updated
+  - App will fallback to locale voice if exact named voice is unavailable
+- Build fails with Java errors:
+  - Ensure JDK is installed and `JAVA_HOME` is set
 
-## License and attributions
+## Project Structure
 
-- Model and tokenizer files have their own licenses. See the `README.md` and `LICENSE` files in `app/src/main/assets/*`.
+- `app/src/main/java/` Kotlin UI, routing, settings, JNI calls.
+- `app/src/main/cpp/` native JNI + Sherpa-ONNX integration.
+- `app/src/main/assets/` model assets.
+- `app/src/main/jniLibs/arm64-v8a/` native shared libraries.
+- `scripts/` setup/download helpers.
+
+## License and Attributions
+
+- Model/tokenizer files have their own licenses in `app/src/main/assets/*`.
 - Sherpa-ONNX and ONNX Runtime are licensed by their respective projects.
