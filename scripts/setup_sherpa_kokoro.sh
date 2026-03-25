@@ -4,9 +4,9 @@ set -euo pipefail
 # Usage:
 #   ./scripts/setup_sherpa_kokoro.sh [sherpa_version]
 # Example:
-#   ./scripts/setup_sherpa_kokoro.sh 1.12.24
+#   ./scripts/setup_sherpa_kokoro.sh 1.12.33
 
-SHERPA_VER="${1:-1.12.24}"
+SHERPA_VER="${1:-1.12.33}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 

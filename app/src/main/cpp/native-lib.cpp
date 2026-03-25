@@ -279,14 +279,59 @@ Java_com_example_tts_NativeTts_runtimeThreads(JNIEnv* /*env*/,
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_tts_NativeTts_warmup(JNIEnv* /*env*/, jobject /*thiz*/,
-                                      jfloat /*speed*/) {
-  std::lock_guard<std::mutex> lock(g_mutex);
-  if (!g_tts) {
-    LOGE("warmup(): called before init()");
-    return JNI_FALSE;
+                                      jfloat speed) {
+  const auto start = std::chrono::steady_clock::now();
+  if (speed <= 0.0f) {
+    speed = 1.0f;
   }
 
-  LOGI("warmup(): disabled (uncached mode)");
+  int32_t sample_rate = kDefaultSampleRate;
+  int32_t num_samples = 0;
+
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_tts) {
+      LOGE("warmup(): called before init()");
+      return JNI_FALSE;
+    }
+
+    constexpr const char* kWarmupText =
+        "This is a warmup run for on device speech synthesis.";
+
+    SherpaOnnxGenerationConfig gen_config;
+    std::memset(&gen_config, 0, sizeof(gen_config));
+    gen_config.sid = 0;
+    gen_config.speed = speed;
+    gen_config.silence_scale = g_preferred_silence_scale;
+
+    const SherpaOnnxGeneratedAudio* audio =
+        SherpaOnnxOfflineTtsGenerateWithConfig(
+            g_tts, kWarmupText, &gen_config, nullptr, nullptr);
+
+    if (!audio) {
+      LOGE("warmup(): SherpaOnnxOfflineTtsGenerateWithConfig returned null");
+      return JNI_FALSE;
+    }
+
+    if (!audio->samples || audio->n <= 0) {
+      LOGE("warmup(): invalid audio output (samples=%p, n=%d)",
+           audio->samples, audio->n);
+      SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+      return JNI_FALSE;
+    }
+
+    sample_rate = audio->sample_rate;
+    num_samples = audio->n;
+    g_sample_rate = sample_rate;
+    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+  }
+
+  const auto end = std::chrono::steady_clock::now();
+  const auto ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+  LOGI("warmup(): speed=%.2f took=%lld ms, samples=%d, sr=%d", speed,
+       static_cast<long long>(ms), num_samples, sample_rate);
   return JNI_TRUE;
 }
 
@@ -330,11 +375,18 @@ Java_com_example_tts_NativeTts_generate(JNIEnv* env, jobject /*thiz*/,
     provider_used = g_provider;
     threads_used = g_num_threads;
 
+    SherpaOnnxGenerationConfig gen_config;
+    std::memset(&gen_config, 0, sizeof(gen_config));
+    gen_config.sid = 0;
+    gen_config.speed = speed;
+    gen_config.silence_scale = g_preferred_silence_scale;
+
     const SherpaOnnxGeneratedAudio* audio =
-        SherpaOnnxOfflineTtsGenerate(g_tts, input.c_str(), 0, speed);
+        SherpaOnnxOfflineTtsGenerateWithConfig(g_tts, input.c_str(),
+                                               &gen_config, nullptr, nullptr);
 
     if (!audio) {
-      LOGE("generate(): SherpaOnnxOfflineTtsGenerate returned null");
+      LOGE("generate(): SherpaOnnxOfflineTtsGenerateWithConfig returned null");
       return EmptyFloatArray(env);
     }
 

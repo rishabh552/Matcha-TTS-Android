@@ -21,7 +21,7 @@ Android text-to-speech demo app using the Matcha acoustic model and a vocoder vi
 1. Prepare native libraries and headers:
 
 ```bash
-./scripts/setup_sherpa_kokoro.sh 1.12.24
+./scripts/setup_sherpa_kokoro.sh 1.12.33
 ```
 
 This installs:
@@ -71,7 +71,7 @@ On first launch, the app copies `assets/matcha` to `filesDir/matcha`, initialize
 ### Prerequisites
 
 Before building, ensure you have completed steps 1 and 2 from "Quick start" above:
-- Native libraries installed via `./scripts/setup_sherpa_kokoro.sh 1.12.24`
+- Native libraries installed via `./scripts/setup_sherpa_kokoro.sh 1.12.33`
 - Model assets installed in `app/src/main/assets/matcha/`
 
 ### Option A: Build from Android Studio

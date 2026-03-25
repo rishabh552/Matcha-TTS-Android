@@ -1,3 +1,24 @@
 <resources>
     <string name="app_name">Matcha TTS</string>
+    <string name="input_hint">Type text to synthesize</string>
+    <string name="length_scale_label">Length scale</string>
+    <string name="noise_scale_label">Noise scale</string>
+    <string name="silence_scale_label">Silence scale</string>
+    <string name="speak_button">Speak</string>
+    <string name="preparing_model">Preparing model...</string>
+    <string name="settings_menu_title">Settings</string>
+    <string name="settings_dialog_title">Speech Settings</string>
+    <string name="settings_apply">Apply</string>
+    <string name="settings_cancel">Cancel</string>
+    <string name="settings_reset_defaults">Defaults</string>
+    <string name="settings_matcha_prosody_title">Matcha English - Prosody</string>
+    <string name="settings_matcha_synthesis_title">Matcha English - Synthesis Profile</string>
+    <string name="settings_hindi_title">Google Hindi</string>
+    <string name="settings_tamil_title">Google Tamil</string>
+    <string name="settings_rate_label">Speech rate</string>
+    <string name="settings_pitch_label">Pitch</string>
+    <string name="settings_short_speed_label">Short speed</string>
+    <string name="settings_normal_speed_label">Normal speed</string>
+    <string name="settings_long_speed_label">Long speed</string>
+    <string name="settings_defaults_placeholder">Defaults</string>
 </resources>

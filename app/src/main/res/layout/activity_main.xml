@@ -2,30 +2,47 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
+    android:orientation="vertical">
 
-    <EditText
-        android:id="@+id/inputEditText"
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/topAppBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:title="@string/app_name" />
+
+    <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:gravity="top|start"
-        android:hint="Type text to synthesize"
-        android:inputType="textMultiLine"
-        android:minLines="6" />
+        android:layout_weight="1">
 
-    <Button
-        android:id="@+id/speakButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="Speak" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
 
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="Preparing model..." />
+            <EditText
+                android:id="@+id/inputEditText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top|start"
+                android:hint="@string/input_hint"
+                android:inputType="textMultiLine"
+                android:minLines="6" />
+
+            <Button
+                android:id="@+id/speakButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/speak_button" />
+
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/preparing_model" />
+        </LinearLayout>
+    </ScrollView>
 </LinearLayout>

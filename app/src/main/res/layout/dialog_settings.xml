@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:id="@+id/settingsMatchaTitleText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_matcha_prosody_title"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/settingsMatchaProsodyDefaultsText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/settings_defaults_placeholder" />
+
+        <TextView
+            android:id="@+id/settingsMatchaLengthLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/length_scale_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsMatchaLengthSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsMatchaNoiseLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/noise_scale_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsMatchaNoiseSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsMatchaSilenceLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/silence_scale_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsMatchaSilenceSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsMatchaSynthesisTitleText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/settings_matcha_synthesis_title"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/settingsMatchaSynthesisDefaultsText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/settings_defaults_placeholder" />
+
+        <TextView
+            android:id="@+id/settingsMatchaShortSpeedLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/settings_short_speed_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsMatchaShortSpeedSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsMatchaNormalSpeedLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_normal_speed_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsMatchaNormalSpeedSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsMatchaLongSpeedLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_long_speed_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsMatchaLongSpeedSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsHindiTitleText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/settings_hindi_title"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/settingsHindiRateLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/settings_rate_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsHindiRateSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsHindiPitchLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_pitch_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsHindiPitchSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsTamilTitleText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/settings_tamil_title"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/settingsTamilRateLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/settings_rate_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsTamilRateSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/settingsTamilPitchLabelText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_pitch_label" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/settingsTamilPitchSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+</ScrollView>
